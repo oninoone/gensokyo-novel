@@ -7,7 +7,7 @@ gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
 SAVE_ID = "main_story"
-WINDOW_ROUNDS = 15  # 15往復（30メッセージ）で精密管理
+WINDOW_ROUNDS = 15  # 15往復（30メッセージ）を一幕として管理
 
 SYSTEM_INSTRUCTION = """
 あなたは幻想郷を舞台とした東方Project二次創作成人向けノベルの共同執筆者（ゲームマスター）です。
@@ -84,13 +84,17 @@ if "summaries" not in st.session_state or "messages" not in st.session_state:
 
 with st.sidebar:
     st.title("📜 記憶アーカイブ")
-    current_rounds = len(st.session_state.messages) // 2
-    remaining = WINDOW_ROUNDS - (current_rounds % WINDOW_ROUNDS)
-    progress_val = (current_rounds % WINDOW_ROUNDS) / WINDOW_ROUNDS
+    total_rounds = len(st.session_state.messages) // 2
+    current_act = len(st.session_state.summaries) + 1
+    act_rounds = total_rounds % WINDOW_ROUNDS
+    remaining = WINDOW_ROUNDS - act_rounds
+    progress_val = act_rounds / WINDOW_ROUNDS
 
-    st.markdown(f"### 現在の幕: **{current_rounds}** 往復目")
+    st.markdown(f"### 第 **{current_act}** 幕: **{act_rounds}** / {WINDOW_ROUNDS} 往復")
     st.progress(progress_val)
-    st.caption(f"💡 次の要約アーカイブまで **あと {remaining} 往復**")
+    st.caption(
+        f"💡 次の要約アーカイブまで **あと {remaining} 往復**（累計: {total_rounds} 往復）"
+    )
 
     if st.button("物語をリセット"):
         commit_save_data([], [])
@@ -101,7 +105,6 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 紡がれた歴史")
     for idx, summary in enumerate(st.session_state.summaries):
-        # 1行目から見出しを抽出（既存データや見出しが無い場合にも自動対応）
         lines = summary.strip().split("\n", 1)
         if len(lines) > 1 and (lines[0].startswith("【") or len(lines[0]) <= 30):
             header_title = lines[0].strip("【】 ")
@@ -130,9 +133,10 @@ with st.sidebar:
                     f"第 {idx + 1} 幕の記録を『{new_title}』として更新しました！"
                 )
                 st.rerun()
-            
+
 st.title("幻想郷 真斉幻想禄")
 
+# 全ての過去ログを画面にそのまま展開
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -143,18 +147,19 @@ if action_input := st.chat_input("真斉のアクションや台詞を入力..."
     with st.chat_message("user"):
         st.markdown(action_input)
 
-    # 15往復（30メッセージ）を超過したら要約してスライド
-    if len(st.session_state.messages) > (WINDOW_ROUNDS * 2):
+    # 15往復（30メッセージ）到達時に要約を作成して蓄積（生ログは削除せずそのまま保持）
+    num_summaries = len(st.session_state.summaries)
+    target_count = (num_summaries + 1) * (WINDOW_ROUNDS * 2)
+
+    if len(st.session_state.messages) > target_count:
         with st.spinner("一幕の記憶を要約アーカイブへ記録中..."):
-            to_summarize = st.session_state.messages[: WINDOW_ROUNDS * 2]
+            start_idx = num_summaries * (WINDOW_ROUNDS * 2)
+            end_idx = target_count
+            to_summarize = st.session_state.messages[start_idx:end_idx]
             new_summary = summarize_old_context(to_summarize)
             st.session_state.summaries.append(new_summary)
-            # 直近15往復のみを手元に残す
-            st.session_state.messages = st.session_state.messages[
-                WINDOW_ROUNDS * 2 :
-            ]
 
-    # プロンプトの組み立て（要約記憶を直前ログと明確に分離して配置）
+    # プロンプトの組み立て（過去の要約群）
     summaries_context = "\n---\n".join(
         [
             f"[過去の記録 第{idx+1}幕]\n{s}"
@@ -167,11 +172,10 @@ if action_input := st.chat_input("真斉のアクションや台詞を入力..."
         else ""
     )
 
+    # 直近15往復（30件）のみを抽出してAIへ入力（文脈の混濁を防ぐ）
+    recent_messages = st.session_state.messages[-(WINDOW_ROUNDS * 2 + 1) : -1]
     history_text = "\n".join(
-        [
-            f"{m['role'].upper()}: {m['content']}"
-            for m in st.session_state.messages[:-1]
-        ]
+        [f"{m['role'].upper()}: {m['content']}" for m in recent_messages]
     )
 
     full_contents = f"""
@@ -196,9 +200,9 @@ ASSISTANT:
             output_story = response.text.strip()
             st.markdown(output_story)
 
-# クラウド同期
+    # 全履歴をそのままSupabaseへ永続保存
     st.session_state.messages.append(
         {"role": "assistant", "content": output_story}
     )
     commit_save_data(st.session_state.summaries, st.session_state.messages)
-    st.rerun()  # ★これを追加すると、返答直後にメーターが即座に進むわ！
+    st.rerun()
