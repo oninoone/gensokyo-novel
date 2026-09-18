@@ -98,7 +98,7 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-st.markdown("---")
+    st.markdown("---")
     st.markdown("### 紡がれた歴史")
     for idx, summary in enumerate(st.session_state.summaries):
         # 1行目から見出しを抽出（既存データや見出しが無い場合にも自動対応）
