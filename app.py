@@ -23,7 +23,7 @@ SYSTEM_INSTRUCTION = """
 - 真斉のアクションに逆らうキャラクターの動きも描写し、必ずしも真斉の意向通りになるのではなく、あくまでキャラクターそれぞれの思考を活かした描写をすること。
 - 官能的な描写や流れを自然に作ること。直接的な性描写も含めること。快感の表現には♡を使うこと。
 - キャラ名(～)の形式で描かれる心理描写は個人の思考であり、キャラクターそれぞれの中でしか認識できない。これは心を読む能力によってのみ暴かれる。
-- キャラクターは東方Projectの設定から考えられる人格であり、知性も原作を踏襲し、自然な会話を描写すること。
+- キャラクターは東方Projectの設定から考えられる人格であり、知性も原作を踏襲し、自然な会話を描写すること。キャラクターが生きた長さを実感させる知見あるいは未熟な部分を描写してキャラクターの実感を持たせること。
 """
 
 
@@ -75,7 +75,7 @@ def summarize_old_context(raw_messages):
 # 4. ページ描画とデータ読み込み
 st.set_page_config(page_title="幻想郷 真斉幻想禄", page_icon="📜", layout="wide")
 
-# 小説の紙面のような自然なタイポグラフィ調整
+# 小説用スタイル調整（真斉の文章のみ色をトーンダウン）
 st.markdown(
     """
     <style>
@@ -84,6 +84,10 @@ st.markdown(
         line-height: 1.95 !important;
         letter-spacing: 0.03em !important;
         margin-bottom: 1.4em !important;
+    }
+    /* 真斉の入力部分：少し暗めの落ち着いたソフトグレー */
+    .user-entry, .user-entry p {
+        color: #8c95a0 !important;
     }
     </style>
 """,
@@ -113,9 +117,15 @@ remaining = WINDOW_ROUNDS - act_rounds
 progress_val = min(act_rounds / WINDOW_ROUNDS, 1.0)
 
 
-# 1つの連続した作品としてシームレスに描画するレンダラー
-def display_novel_entry(content):
-    st.markdown(content)
+# 役割に応じてトーンを分けるレンダラー
+def display_novel_entry(role, content):
+    if role == "user":
+        st.markdown(
+            f'<div class="user-entry">\n\n{content}\n\n</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(content)
 
 
 with st.sidebar:
@@ -207,7 +217,7 @@ if st.session_state.selected_act is not None:
     ]
     if reminiscence_messages:
         for msg in reminiscence_messages:
-            display_novel_entry(msg["content"])
+            display_novel_entry(msg["role"], msg["content"])
     else:
         st.info(
             f"💡 第 {target_act} 幕の生ログは、完全保存機能の導入前の幕のため保管されていません。左サイドバーの「要約本文」から当時の記録をお楽しみください。"
@@ -218,7 +228,7 @@ else:
     st.title("幻想郷 真斉幻想禄")
 
     for msg in current_act_messages:
-        display_novel_entry(msg["content"])
+        display_novel_entry(msg["role"], msg["content"])
 
     if action_input := st.chat_input("物語の続きを執筆..."):
         user_msg = {
@@ -227,7 +237,7 @@ else:
             "act": current_act,
         }
         st.session_state.messages.append(user_msg)
-        display_novel_entry(action_input)
+        display_novel_entry("user", action_input)
 
         summaries_context = "\n---\n".join(
             [
@@ -267,7 +277,7 @@ ASSISTANT:
                 ),
             )
             output_story = response.text.strip()
-            display_novel_entry(output_story)
+            display_novel_entry("assistant", output_story)
 
         assistant_msg = {
             "role": "assistant",
