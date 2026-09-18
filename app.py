@@ -93,7 +93,7 @@ with st.sidebar:
         with st.expander(f"第 {i} 幕の記録"):
             st.write(summary)
 
-st.title("幻想郷 共同執筆年代記")
+st.title("幻想郷 真斉幻想禄")
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
