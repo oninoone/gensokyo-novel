@@ -80,16 +80,29 @@ st.set_page_config(
 if "summaries" not in st.session_state or "messages" not in st.session_state:
     db_summaries, db_messages = fetch_save_data()
     st.session_state.summaries = db_summaries
+
+    # 既存ログへの幕番号タグ自動付与（現在進行中の幕として安全に紐付け）
+    current_act_init = len(db_summaries) + 1
+    for m in db_messages:
+        if "act" not in m:
+            m["act"] = current_act_init
     st.session_state.messages = db_messages
 
-# 表示中の幕（Noneなら最新の現在進行中の幕）
 if "selected_act" not in st.session_state:
     st.session_state.selected_act = None
+
+current_act = len(st.session_state.summaries) + 1
+current_act_messages = [
+    m for m in st.session_state.messages if m.get("act") == current_act
+]
+act_rounds = len(current_act_messages) // 2
+total_rounds = (len(st.session_state.summaries) * WINDOW_ROUNDS) + act_rounds
+remaining = WINDOW_ROUNDS - act_rounds
+progress_val = min(act_rounds / WINDOW_ROUNDS, 1.0)
 
 with st.sidebar:
     st.title("📜 記憶アーカイブ")
 
-    # 回想中または通常時に使える「現在へ」復帰ボタン
     if st.session_state.selected_act is not None:
         if st.button(
             "↩ 現在へ戻る（最新の執筆画面へ）",
@@ -100,12 +113,6 @@ with st.sidebar:
             st.rerun()
     else:
         st.caption("📍 現在: 最新の幕を執筆中")
-
-    total_rounds = len(st.session_state.messages) // 2
-    current_act = len(st.session_state.summaries) + 1
-    act_rounds = total_rounds % WINDOW_ROUNDS
-    remaining = WINDOW_ROUNDS - act_rounds
-    progress_val = act_rounds / WINDOW_ROUNDS
 
     st.markdown(
         f"### 第 **{current_act}** 幕: **{act_rounds}** / {WINDOW_ROUNDS} 往復"
@@ -134,7 +141,6 @@ with st.sidebar:
             body_text = summary
 
         with st.expander(f"第 {idx + 1} 幕の記録 - {header_title}"):
-            # ★当時の生ログを表示するボタン
             if st.button(
                 f"📖 当時の記憶を見る（第 {idx + 1} 幕）",
                 key=f"view_act_btn_{idx}",
@@ -165,55 +171,51 @@ with st.sidebar:
 
 # 5. メイン画面の描画切り替え
 if st.session_state.selected_act is not None:
-    # --- 【回想モード】当時の記憶（生ログ）を表示 ---
+    # --- 【回想モード】 ---
     act_idx = st.session_state.selected_act
+    target_act = act_idx + 1
     col_t, col_b = st.columns([4, 1])
     with col_t:
-        st.title(f"📖 第 {act_idx + 1} 幕の記憶（回想中）")
+        st.title(f"📖 第 {target_act} 幕の記憶（回想中）")
     with col_b:
-        if st.button("↩ 現在へ", key="back_to_present_main", use_container_width=True):
+        if st.button(
+            "↩ 現在へ", key="back_to_present_main", use_container_width=True
+        ):
             st.session_state.selected_act = None
             st.rerun()
 
-    start_idx = act_idx * (WINDOW_ROUNDS * 2)
-    end_idx = start_idx + (WINDOW_ROUNDS * 2)
-    reminiscence_messages = st.session_state.messages[start_idx:end_idx]
-
-    for msg in reminiscence_messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    # その幕のタグを持つメッセージのみを抽出
+    reminiscence_messages = [
+        m for m in st.session_state.messages if m.get("act") == target_act
+    ]
+    if reminiscence_messages:
+        for msg in reminiscence_messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+    else:
+        st.info(
+            f"💡 第 {target_act} 幕の生ログは、完全保存機能の導入前の幕のため保管されていません。左サイドバーの「要約本文」から当時の記録をお楽しみください。"
+        )
 
 else:
-    # --- 【通常モード】現在進行中の最新のやりとりを表示 ---
+    # --- 【通常モード】現在進行中の最新の幕のみを表示・執筆 ---
     st.title("幻想郷 真斉幻想禄")
 
-    current_start_idx = len(st.session_state.summaries) * (WINDOW_ROUNDS * 2)
-    active_messages = st.session_state.messages[current_start_idx:]
-
-    for msg in active_messages:
+    for msg in current_act_messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # アクション入力と生成（現在進行中のみ入力可能）
     if action_input := st.chat_input("真斉のアクションや台詞を入力..."):
-        st.session_state.messages.append(
-            {"role": "user", "content": action_input}
-        )
+        user_msg = {
+            "role": "user",
+            "content": action_input,
+            "act": current_act,
+        }
+        st.session_state.messages.append(user_msg)
         with st.chat_message("user"):
             st.markdown(action_input)
 
-        num_summaries = len(st.session_state.summaries)
-        target_count = (num_summaries + 1) * (WINDOW_ROUNDS * 2)
-
-        if len(st.session_state.messages) > target_count:
-            with st.spinner("一幕の記憶を要約アーカイブへ記録中..."):
-                start_idx = num_summaries * (WINDOW_ROUNDS * 2)
-                end_idx = target_count
-                to_summarize = st.session_state.messages[start_idx:end_idx]
-                new_summary = summarize_old_context(to_summarize)
-                st.session_state.summaries.append(new_summary)
-
-        # プロンプトの組み立て
+        # プロンプト組み立て（過去の要約群）
         summaries_context = "\n---\n".join(
             [
                 f"[過去の記録 第{idx+1}幕]\n{s}"
@@ -255,9 +257,21 @@ ASSISTANT:
                 output_story = response.text.strip()
                 st.markdown(output_story)
 
-        # 全履歴をSupabaseへ永続保存
-        st.session_state.messages.append(
-            {"role": "assistant", "content": output_story}
-        )
+        assistant_msg = {
+            "role": "assistant",
+            "content": output_story,
+            "act": current_act,
+        }
+        st.session_state.messages.append(assistant_msg)
+
+        # 現在の幕が15往復（30件）に到達したら、その幕のログを要約してアーカイブ化
+        updated_act_messages = [
+            m for m in st.session_state.messages if m.get("act") == current_act
+        ]
+        if len(updated_act_messages) >= (WINDOW_ROUNDS * 2):
+            with st.spinner("一幕の記憶を要約アーカイブへ記録中..."):
+                new_summary = summarize_old_context(updated_act_messages)
+                st.session_state.summaries.append(new_summary)
+
         commit_save_data(st.session_state.summaries, st.session_state.messages)
         st.rerun()
