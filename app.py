@@ -73,8 +73,32 @@ def summarize_old_context(raw_messages):
 
 
 # 4. ページ描画とデータ読み込み
-st.set_page_config(
-    page_title="幻想郷 共同執筆年代記", page_icon="📜", layout="wide"
+st.set_page_config(page_title="幻想郷 真斉幻想禄", page_icon="📜", layout="wide")
+
+# Web小説風のタイポグラフィ調整（行間・文字サイズ・引用枠のデザイン）
+st.markdown(
+    """
+    <style>
+    .stMarkdown p {
+        font-size: 1.08rem !important;
+        line-height: 1.9 !important;
+        letter-spacing: 0.03em !important;
+        margin-bottom: 1.2em !important;
+    }
+    blockquote {
+        border-left: 3px solid #ff4b4b !important;
+        background-color: rgba(255, 75, 75, 0.05) !important;
+        padding: 10px 16px !important;
+        border-radius: 0 8px 8px 0 !important;
+        margin: 1.6em 0 !important;
+    }
+    hr {
+        margin: 2.5em 0 !important;
+        border-color: rgba(255, 255, 255, 0.1) !important;
+    }
+    </style>
+""",
+    unsafe_allow_html=True,
 )
 
 if "summaries" not in st.session_state or "messages" not in st.session_state:
@@ -84,7 +108,7 @@ if "summaries" not in st.session_state or "messages" not in st.session_state:
 
 current_act = len(st.session_state.summaries) + 1
 
-# ★救出処理：タグ無しのメッセージを漏れなく現在の幕（第2幕）として修復
+# タグ無しの古いログを現在の幕に安全に割り当て
 for m in st.session_state.messages:
     if "act" not in m:
         m["act"] = current_act
@@ -99,6 +123,17 @@ act_rounds = len(current_act_messages) // 2
 total_rounds = (len(st.session_state.summaries) * WINDOW_ROUNDS) + act_rounds
 remaining = WINDOW_ROUNDS - act_rounds
 progress_val = min(act_rounds / WINDOW_ROUNDS, 1.0)
+
+
+# 小説風メッセージレンダラー
+def display_novel_entry(role, content):
+    if role == "user":
+        formatted_content = content.replace("\n", "\n> ")
+        st.markdown(f"> 🖋️ **真斉の選択**  \n> {formatted_content}")
+    else:
+        st.markdown(content)
+        st.markdown("---")
+
 
 with st.sidebar:
     st.title("📜 記憶アーカイブ")
@@ -189,20 +224,18 @@ if st.session_state.selected_act is not None:
     ]
     if reminiscence_messages:
         for msg in reminiscence_messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+            display_novel_entry(msg["role"], msg["content"])
     else:
         st.info(
             f"💡 第 {target_act} 幕の生ログは、完全保存機能の導入前の幕のため保管されていません。左サイドバーの「要約本文」から当時の記録をお楽しみください。"
         )
 
 else:
-    # --- 【通常モード】現在進行中の最新の幕のみを表示・執筆 ---
+    # --- 【通常モード】 ---
     st.title("幻想郷 真斉幻想禄")
 
     for msg in current_act_messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+        display_novel_entry(msg["role"], msg["content"])
 
     if action_input := st.chat_input("真斉のアクションや台詞を入力..."):
         user_msg = {
@@ -211,8 +244,7 @@ else:
             "act": current_act,
         }
         st.session_state.messages.append(user_msg)
-        with st.chat_message("user"):
-            st.markdown(action_input)
+        display_novel_entry("user", action_input)
 
         summaries_context = "\n---\n".join(
             [
@@ -241,19 +273,18 @@ USER: {action_input}
 ASSISTANT:
 """
 
-        with st.chat_message("assistant"):
-            with st.spinner("幻想郷の時間を進めています..."):
-                response = gemini_client.models.generate_content(
-                    model="models/gemini-3.8-flash",
-                    contents=full_contents,
-                    config=genai.types.GenerateContentConfig(
-                        system_instruction=SYSTEM_INSTRUCTION,
-                        temperature=0.85,
-                        max_output_tokens=2048,
-                    ),
-                )
-                output_story = response.text.strip()
-                st.markdown(output_story)
+        with st.spinner("幻想郷の時間を進めています..."):
+            response = gemini_client.models.generate_content(
+                model="models/gemini-3.8-flash",
+                contents=full_contents,
+                config=genai.types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    temperature=0.85,
+                    max_output_tokens=2048,
+                ),
+            )
+            output_story = response.text.strip()
+            display_novel_entry("assistant", output_story)
 
         assistant_msg = {
             "role": "assistant",
