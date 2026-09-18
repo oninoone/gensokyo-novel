@@ -61,7 +61,7 @@ def summarize_old_context(raw_messages):
 {conversation_text}
 """
     resp = gemini_client.models.generate_content(
-        model="gemini-3.8-flash", contents=prompt
+        model="models/gemini-3.8-flash", contents=prompt
     )
     return resp.text.strip()
 
@@ -147,7 +147,7 @@ ASSISTANT:
     with st.chat_message("assistant"):
         with st.spinner("幻想郷の時間を進めています..."):
             response = gemini_client.models.generate_content(
-                model="models/gemini-2.5-flash",
+                model="models/gemini-3.8-flash",
                 contents=full_contents,
                 config=genai.types.GenerateContentConfig(
                     system_instruction=SYSTEM_INSTRUCTION,
