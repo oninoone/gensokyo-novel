@@ -75,26 +75,15 @@ def summarize_old_context(raw_messages):
 # 4. ページ描画とデータ読み込み
 st.set_page_config(page_title="幻想郷 真斉幻想禄", page_icon="📜", layout="wide")
 
-# Web小説風のタイポグラフィ調整（行間・文字サイズ・引用枠のデザイン）
+# 小説の紙面のような自然なタイポグラフィ調整
 st.markdown(
     """
     <style>
     .stMarkdown p {
         font-size: 1.08rem !important;
-        line-height: 1.9 !important;
+        line-height: 1.95 !important;
         letter-spacing: 0.03em !important;
-        margin-bottom: 1.2em !important;
-    }
-    blockquote {
-        border-left: 3px solid #ff4b4b !important;
-        background-color: rgba(255, 75, 75, 0.05) !important;
-        padding: 10px 16px !important;
-        border-radius: 0 8px 8px 0 !important;
-        margin: 1.6em 0 !important;
-    }
-    hr {
-        margin: 2.5em 0 !important;
-        border-color: rgba(255, 255, 255, 0.1) !important;
+        margin-bottom: 1.4em !important;
     }
     </style>
 """,
@@ -108,7 +97,6 @@ if "summaries" not in st.session_state or "messages" not in st.session_state:
 
 current_act = len(st.session_state.summaries) + 1
 
-# タグ無しの古いログを現在の幕に安全に割り当て
 for m in st.session_state.messages:
     if "act" not in m:
         m["act"] = current_act
@@ -125,14 +113,9 @@ remaining = WINDOW_ROUNDS - act_rounds
 progress_val = min(act_rounds / WINDOW_ROUNDS, 1.0)
 
 
-# 小説風メッセージレンダラー
-def display_novel_entry(role, content):
-    if role == "user":
-        formatted_content = content.replace("\n", "\n> ")
-        st.markdown(f"> 🖋️ **真斉の選択**  \n> {formatted_content}")
-    else:
-        st.markdown(content)
-        st.markdown("---")
+# 1つの連続した作品としてシームレスに描画するレンダラー
+def display_novel_entry(content):
+    st.markdown(content)
 
 
 with st.sidebar:
@@ -204,7 +187,7 @@ with st.sidebar:
                 )
                 st.rerun()
 
-# 5. メイン画面の描画切り替え
+# 5. メイン画面の描画
 if st.session_state.selected_act is not None:
     # --- 【回想モード】 ---
     act_idx = st.session_state.selected_act
@@ -224,7 +207,7 @@ if st.session_state.selected_act is not None:
     ]
     if reminiscence_messages:
         for msg in reminiscence_messages:
-            display_novel_entry(msg["role"], msg["content"])
+            display_novel_entry(msg["content"])
     else:
         st.info(
             f"💡 第 {target_act} 幕の生ログは、完全保存機能の導入前の幕のため保管されていません。左サイドバーの「要約本文」から当時の記録をお楽しみください。"
@@ -235,16 +218,16 @@ else:
     st.title("幻想郷 真斉幻想禄")
 
     for msg in current_act_messages:
-        display_novel_entry(msg["role"], msg["content"])
+        display_novel_entry(msg["content"])
 
-    if action_input := st.chat_input("真斉のアクションや台詞を入力..."):
+    if action_input := st.chat_input("物語の続きを執筆..."):
         user_msg = {
             "role": "user",
             "content": action_input,
             "act": current_act,
         }
         st.session_state.messages.append(user_msg)
-        display_novel_entry("user", action_input)
+        display_novel_entry(action_input)
 
         summaries_context = "\n---\n".join(
             [
@@ -284,7 +267,7 @@ ASSISTANT:
                 ),
             )
             output_story = response.text.strip()
-            display_novel_entry("assistant", output_story)
+            display_novel_entry(output_story)
 
         assistant_msg = {
             "role": "assistant",
