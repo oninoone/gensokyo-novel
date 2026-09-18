@@ -61,7 +61,7 @@ def summarize_old_context(raw_messages):
 {conversation_text}
 """
     resp = gemini_client.models.generate_content(
-        model="models/gemini-2.5-flash", contents=prompt
+        model="gemini-3.8-flash", contents=prompt
     )
     return resp.text.strip()
 
