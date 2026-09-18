@@ -80,18 +80,18 @@ st.set_page_config(
 if "summaries" not in st.session_state or "messages" not in st.session_state:
     db_summaries, db_messages = fetch_save_data()
     st.session_state.summaries = db_summaries
-
-    # 既存ログへの幕番号タグ自動付与（現在進行中の幕として安全に紐付け）
-    current_act_init = len(db_summaries) + 1
-    for m in db_messages:
-        if "act" not in m:
-            m["act"] = current_act_init
     st.session_state.messages = db_messages
+
+current_act = len(st.session_state.summaries) + 1
+
+# ★救出処理：タグ無しのメッセージを漏れなく現在の幕（第2幕）として修復
+for m in st.session_state.messages:
+    if "act" not in m:
+        m["act"] = current_act
 
 if "selected_act" not in st.session_state:
     st.session_state.selected_act = None
 
-current_act = len(st.session_state.summaries) + 1
 current_act_messages = [
     m for m in st.session_state.messages if m.get("act") == current_act
 ]
@@ -184,7 +184,6 @@ if st.session_state.selected_act is not None:
             st.session_state.selected_act = None
             st.rerun()
 
-    # その幕のタグを持つメッセージのみを抽出
     reminiscence_messages = [
         m for m in st.session_state.messages if m.get("act") == target_act
     ]
@@ -215,7 +214,6 @@ else:
         with st.chat_message("user"):
             st.markdown(action_input)
 
-        # プロンプト組み立て（過去の要約群）
         summaries_context = "\n---\n".join(
             [
                 f"[過去の記録 第{idx+1}幕]\n{s}"
@@ -264,7 +262,6 @@ ASSISTANT:
         }
         st.session_state.messages.append(assistant_msg)
 
-        # 現在の幕が15往復（30件）に到達したら、その幕のログを要約してアーカイブ化
         updated_act_messages = [
             m for m in st.session_state.messages if m.get("act") == current_act
         ]
