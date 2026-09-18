@@ -57,7 +57,11 @@ def summarize_old_context(raw_messages):
     )
     prompt = f"""
 以下は幻想郷で紡がれた物語の対話ログ（15往復分）です。
-今後の物語進行で引き継ぐべき「キャラクター間の感情の揺れ動き、交わされた約束、発生した出来事、現在の状況」を、400〜600文字程度で密度高く要約しなさい。
+今後の物語進行で引き継ぐべき「キャラクター間の感情の揺れ動き、交わされた約束、発生した出来事、現在の状況」を密度高く要約しなさい。
+
+【出力フォーマット】
+1行目：この一幕の出来事を象徴する魅力的な見出し（20文字以内、例：【魔法の森の邂逅とアリスの実験】）
+2行目以降：400〜600文字程度の要約本文
 
 【ログ】
 {conversation_text}
@@ -94,11 +98,38 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-    st.markdown("---")
+st.markdown("---")
     st.markdown("### 紡がれた歴史")
-    for i, summary in enumerate(st.session_state.summaries, 1):
-        with st.expander(f"第 {i} 幕の記録"):
-            st.write(summary)
+    for idx, summary in enumerate(st.session_state.summaries):
+        # 1行目から見出しを抽出（既存データや見出しが無い場合にも自動対応）
+        lines = summary.strip().split("\n", 1)
+        if len(lines) > 1 and (lines[0].startswith("【") or len(lines[0]) <= 30):
+            header_title = lines[0].strip("【】 ")
+            body_text = lines[1].strip()
+        else:
+            header_title = "未題の幕"
+            body_text = summary
+
+        with st.expander(f"第 {idx + 1} 幕の記録 - {header_title}"):
+            new_title = st.text_input(
+                "見出し（サブタイトル）",
+                value=header_title,
+                key=f"title_{idx}",
+            )
+            new_body = st.text_area(
+                "要約本文", value=body_text, height=220, key=f"body_{idx}"
+            )
+
+            if st.button("この記録を保存", key=f"save_summary_btn_{idx}"):
+                combined = f"【{new_title}】\n{new_body}"
+                st.session_state.summaries[idx] = combined
+                commit_save_data(
+                    st.session_state.summaries, st.session_state.messages
+                )
+                st.toast(
+                    f"第 {idx + 1} 幕の記録を『{new_title}』として更新しました！"
+                )
+                st.rerun()
             
 st.title("幻想郷 真斉幻想禄")
 
