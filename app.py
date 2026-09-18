@@ -79,8 +79,12 @@ if "summaries" not in st.session_state or "messages" not in st.session_state:
 with st.sidebar:
     st.title("📜 記憶アーカイブ")
     current_rounds = len(st.session_state.messages) // 2
-    st.caption(f"現在の幕: {current_rounds} / {WINDOW_ROUNDS} 往復")
-    st.progress(min(current_rounds / WINDOW_ROUNDS, 1.0))
+    remaining = WINDOW_ROUNDS - (current_rounds % WINDOW_ROUNDS)
+    progress_val = (current_rounds % WINDOW_ROUNDS) / WINDOW_ROUNDS
+
+    st.markdown(f"### 現在の幕: **{current_rounds}** 往復目")
+    st.progress(progress_val)
+    st.caption(f"💡 次の要約アーカイブまで **あと {remaining} 往復**")
 
     if st.button("物語をリセット"):
         commit_save_data([], [])
@@ -88,11 +92,12 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
+    st.markdown("---")
     st.markdown("### 紡がれた歴史")
     for i, summary in enumerate(st.session_state.summaries, 1):
         with st.expander(f"第 {i} 幕の記録"):
             st.write(summary)
-
+            
 st.title("幻想郷 真斉幻想禄")
 
 for msg in st.session_state.messages:
@@ -158,8 +163,9 @@ ASSISTANT:
             output_story = response.text.strip()
             st.markdown(output_story)
 
-    # クラウド同期
+# クラウド同期
     st.session_state.messages.append(
         {"role": "assistant", "content": output_story}
     )
     commit_save_data(st.session_state.summaries, st.session_state.messages)
+    st.rerun()  # ★これを追加すると、返答直後にメーターが即座に進むわ！
