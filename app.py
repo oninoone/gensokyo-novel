@@ -82,15 +82,34 @@ if "summaries" not in st.session_state or "messages" not in st.session_state:
     st.session_state.summaries = db_summaries
     st.session_state.messages = db_messages
 
+# 表示中の幕（Noneなら最新の現在進行中の幕）
+if "selected_act" not in st.session_state:
+    st.session_state.selected_act = None
+
 with st.sidebar:
     st.title("📜 記憶アーカイブ")
+
+    # 回想中または通常時に使える「現在へ」復帰ボタン
+    if st.session_state.selected_act is not None:
+        if st.button(
+            "↩ 現在へ戻る（最新の執筆画面へ）",
+            type="primary",
+            use_container_width=True,
+        ):
+            st.session_state.selected_act = None
+            st.rerun()
+    else:
+        st.caption("📍 現在: 最新の幕を執筆中")
+
     total_rounds = len(st.session_state.messages) // 2
     current_act = len(st.session_state.summaries) + 1
     act_rounds = total_rounds % WINDOW_ROUNDS
     remaining = WINDOW_ROUNDS - act_rounds
     progress_val = act_rounds / WINDOW_ROUNDS
 
-    st.markdown(f"### 第 **{current_act}** 幕: **{act_rounds}** / {WINDOW_ROUNDS} 往復")
+    st.markdown(
+        f"### 第 **{current_act}** 幕: **{act_rounds}** / {WINDOW_ROUNDS} 往復"
+    )
     st.progress(progress_val)
     st.caption(
         f"💡 次の要約アーカイブまで **あと {remaining} 往復**（累計: {total_rounds} 往復）"
@@ -100,6 +119,7 @@ with st.sidebar:
         commit_save_data([], [])
         st.session_state.summaries = []
         st.session_state.messages = []
+        st.session_state.selected_act = None
         st.rerun()
 
     st.markdown("---")
@@ -114,13 +134,22 @@ with st.sidebar:
             body_text = summary
 
         with st.expander(f"第 {idx + 1} 幕の記録 - {header_title}"):
+            # ★当時の生ログを表示するボタン
+            if st.button(
+                f"📖 当時の記憶を見る（第 {idx + 1} 幕）",
+                key=f"view_act_btn_{idx}",
+                use_container_width=True,
+            ):
+                st.session_state.selected_act = idx
+                st.rerun()
+
             new_title = st.text_input(
                 "見出し（サブタイトル）",
                 value=header_title,
                 key=f"title_{idx}",
             )
             new_body = st.text_area(
-                "要約本文", value=body_text, height=220, key=f"body_{idx}"
+                "要約本文", value=body_text, height=180, key=f"body_{idx}"
             )
 
             if st.button("この記録を保存", key=f"save_summary_btn_{idx}"):
@@ -134,51 +163,77 @@ with st.sidebar:
                 )
                 st.rerun()
 
-st.title("幻想郷 真斉幻想禄")
+# 5. メイン画面の描画切り替え
+if st.session_state.selected_act is not None:
+    # --- 【回想モード】当時の記憶（生ログ）を表示 ---
+    act_idx = st.session_state.selected_act
+    col_t, col_b = st.columns([4, 1])
+    with col_t:
+        st.title(f"📖 第 {act_idx + 1} 幕の記憶（回想中）")
+    with col_b:
+        if st.button("↩ 現在へ", key="back_to_present_main", use_container_width=True):
+            st.session_state.selected_act = None
+            st.rerun()
 
-# 全ての過去ログを画面にそのまま展開
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+    start_idx = act_idx * (WINDOW_ROUNDS * 2)
+    end_idx = start_idx + (WINDOW_ROUNDS * 2)
+    reminiscence_messages = st.session_state.messages[start_idx:end_idx]
 
-# 5. アクション入力と生成
-if action_input := st.chat_input("真斉のアクションや台詞を入力..."):
-    st.session_state.messages.append({"role": "user", "content": action_input})
-    with st.chat_message("user"):
-        st.markdown(action_input)
+    for msg in reminiscence_messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-    # 15往復（30メッセージ）到達時に要約を作成して蓄積（生ログは削除せずそのまま保持）
-    num_summaries = len(st.session_state.summaries)
-    target_count = (num_summaries + 1) * (WINDOW_ROUNDS * 2)
+else:
+    # --- 【通常モード】現在進行中の最新のやりとりを表示 ---
+    st.title("幻想郷 真斉幻想禄")
 
-    if len(st.session_state.messages) > target_count:
-        with st.spinner("一幕の記憶を要約アーカイブへ記録中..."):
-            start_idx = num_summaries * (WINDOW_ROUNDS * 2)
-            end_idx = target_count
-            to_summarize = st.session_state.messages[start_idx:end_idx]
-            new_summary = summarize_old_context(to_summarize)
-            st.session_state.summaries.append(new_summary)
+    current_start_idx = len(st.session_state.summaries) * (WINDOW_ROUNDS * 2)
+    active_messages = st.session_state.messages[current_start_idx:]
 
-    # プロンプトの組み立て（過去の要約群）
-    summaries_context = "\n---\n".join(
-        [
-            f"[過去の記録 第{idx+1}幕]\n{s}"
-            for idx, s in enumerate(st.session_state.summaries)
+    for msg in active_messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # アクション入力と生成（現在進行中のみ入力可能）
+    if action_input := st.chat_input("真斉のアクションや台詞を入力..."):
+        st.session_state.messages.append(
+            {"role": "user", "content": action_input}
+        )
+        with st.chat_message("user"):
+            st.markdown(action_input)
+
+        num_summaries = len(st.session_state.summaries)
+        target_count = (num_summaries + 1) * (WINDOW_ROUNDS * 2)
+
+        if len(st.session_state.messages) > target_count:
+            with st.spinner("一幕の記憶を要約アーカイブへ記録中..."):
+                start_idx = num_summaries * (WINDOW_ROUNDS * 2)
+                end_idx = target_count
+                to_summarize = st.session_state.messages[start_idx:end_idx]
+                new_summary = summarize_old_context(to_summarize)
+                st.session_state.summaries.append(new_summary)
+
+        # プロンプトの組み立て
+        summaries_context = "\n---\n".join(
+            [
+                f"[過去の記録 第{idx+1}幕]\n{s}"
+                for idx, s in enumerate(st.session_state.summaries)
+            ]
+        )
+        archive_block = (
+            f"【過去の物語の要約・確定した歴史】\n{summaries_context}\n\n"
+            if summaries_context
+            else ""
+        )
+
+        recent_messages = st.session_state.messages[
+            -(WINDOW_ROUNDS * 2 + 1) : -1
         ]
-    )
-    archive_block = (
-        f"【過去の物語の要約・確定した歴史】\n{summaries_context}\n\n"
-        if summaries_context
-        else ""
-    )
+        history_text = "\n".join(
+            [f"{m['role'].upper()}: {m['content']}" for m in recent_messages]
+        )
 
-    # 直近15往復（30件）のみを抽出してAIへ入力（文脈の混濁を防ぐ）
-    recent_messages = st.session_state.messages[-(WINDOW_ROUNDS * 2 + 1) : -1]
-    history_text = "\n".join(
-        [f"{m['role'].upper()}: {m['content']}" for m in recent_messages]
-    )
-
-    full_contents = f"""
+        full_contents = f"""
 {archive_block}【直近の情景と対話ログ】
 {history_text}
 
@@ -186,23 +241,23 @@ USER: {action_input}
 ASSISTANT:
 """
 
-    with st.chat_message("assistant"):
-        with st.spinner("幻想郷の時間を進めています..."):
-            response = gemini_client.models.generate_content(
-                model="models/gemini-3.8-flash",
-                contents=full_contents,
-                config=genai.types.GenerateContentConfig(
-                    system_instruction=SYSTEM_INSTRUCTION,
-                    temperature=0.85,
-                    max_output_tokens=2048,
-                ),
-            )
-            output_story = response.text.strip()
-            st.markdown(output_story)
+        with st.chat_message("assistant"):
+            with st.spinner("幻想郷の時間を進めています..."):
+                response = gemini_client.models.generate_content(
+                    model="models/gemini-3.8-flash",
+                    contents=full_contents,
+                    config=genai.types.GenerateContentConfig(
+                        system_instruction=SYSTEM_INSTRUCTION,
+                        temperature=0.85,
+                        max_output_tokens=2048,
+                    ),
+                )
+                output_story = response.text.strip()
+                st.markdown(output_story)
 
-    # 全履歴をそのままSupabaseへ永続保存
-    st.session_state.messages.append(
-        {"role": "assistant", "content": output_story}
-    )
-    commit_save_data(st.session_state.summaries, st.session_state.messages)
-    st.rerun()
+        # 全履歴をSupabaseへ永続保存
+        st.session_state.messages.append(
+            {"role": "assistant", "content": output_story}
+        )
+        commit_save_data(st.session_state.summaries, st.session_state.messages)
+        st.rerun()
