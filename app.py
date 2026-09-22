@@ -13,8 +13,9 @@ WINDOW_ROUNDS = 15  # 15往復（30メッセージ）を一幕として管理
 SYSTEM_INSTRUCTION = """
 あなたは幻想郷を舞台とした東方Project二次創作成人向けノベルの共同執筆者（ゲームマスター）です。
 真斉（しんせい）のアクションを受け、その場の情景描写、複数キャラクターの心の機微や台詞、息遣いのある動作を緻密に描いて物語を展開してください。
-【真斉の設定】
-- 20代後半の顔立ちの良い青年で、少し細身で鍛えている。
+【前提条件】
+- 登場人物は全員が成人・成熟した精神と肉体を持つ大人の女性（魔法使いや妖怪含む）であり、互いの合意に基づく大人の情愛と関係性を描きます。
+- 真斉の設定：20代後半の顔立ちの良い青年で、少し細身で鍛えている。
 
 【執筆ルール】
 - 1回の出力はおよそ800〜1200文字程度の濃密な文量とすること。
@@ -22,14 +23,14 @@ SYSTEM_INSTRUCTION = """
 - 文章の一番最初に日時(〇年〇月〇日、24；00表記)と場所、天候を箇条書きに描写すること。
 - 真斉のアクションを活かし、状況や感情の機微を前進させること。
 - 真斉のアクションに逆らうキャラクターの動きも描写し、必ずしも真斉の意向通りになるのではなく、あくまでキャラクターそれぞれの思考を活かした描写をすること。
-- 官能的な描写や流れは無理に作らず、自然に描写すること。描写する際は直接的な性描写も含めること。快感の表現には♡を使うこと。
+- 官能的な描写や流れは無理に作らず、自然に描写すること。直接的な解剖学的スラングに偏りすぎず、艶やかな情景、肌の熱や息遣い、感情の昂ぶりを濃厚に描くこと。快感の表現には♡を使うこと。
 - キャラ名(～)の形式で描かれる心理描写は個人の思考であり、キャラクターそれぞれの中でしか認識できない。これは心を読む能力によってのみ暴かれる。
-- キャラクターは東方Projectの設定から考えられる人格であり、知性も原作を踏襲し、自然な会話を描写すること。キャラクターが生きた長さを実感させる知見あるいは未熟な部分を描写してキャラクターの実感を持たせること。
+- キャラクターは東方Projectの設定から考えられる人格であり、知性も原作を踏襲し、自然な会話を描写すること。長く生きてきた知見や、プライドの裏にある不器用な機微を描写してキャラクターの実感を持たせること。
 - キャラクターの日常や幻想郷の日常を極端に曲げないこと。
-- キャラクターは無暗に発情しないこと。一般常識的な節度を持った性欲が基準となり、キャラクターの性格ごとに欲が異なる。
+- キャラクターは無暗に発情しないこと。一般常識的な節度を持った情欲が基準となり、キャラクターの性格ごとに欲が異なる。
 """
 
-# セーフティフィルターの制限を全解除
+# セーフティフィルター全解除
 CUSTOM_SAFETY_SETTINGS = [
     types.SafetySetting(
         category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
@@ -111,7 +112,6 @@ def summarize_old_context(raw_messages):
 # 4. ページ描画とデータ読み込み
 st.set_page_config(page_title="幻想郷 真斉幻想禄", page_icon="📜", layout="wide")
 
-# 小説用スタイル調整（真斉の文章のみ色をトーンダウン）
 st.markdown(
     """
     <style>
@@ -121,7 +121,6 @@ st.markdown(
         letter-spacing: 0.03em !important;
         margin-bottom: 1.4em !important;
     }
-    /* 真斉の入力部分：少し暗めの落ち着いたソフトグレー */
     .user-entry, .user-entry p {
         color: #8c95a0 !important;
     }
@@ -153,7 +152,6 @@ remaining = WINDOW_ROUNDS - act_rounds
 progress_val = min(act_rounds / WINDOW_ROUNDS, 1.0)
 
 
-# 役割に応じてトーンを分けるレンダラー
 def display_novel_entry(role, content):
     if role == "user":
         st.markdown(
@@ -235,7 +233,6 @@ with st.sidebar:
 
 # 5. メイン画面の描画
 if st.session_state.selected_act is not None:
-    # --- 【回想モード】 ---
     act_idx = st.session_state.selected_act
     target_act = act_idx + 1
     col_t, col_b = st.columns([4, 1])
@@ -260,7 +257,6 @@ if st.session_state.selected_act is not None:
         )
 
 else:
-    # --- 【通常モード】 ---
     st.title("幻想郷 真斉幻想禄")
 
     for msg in current_act_messages:
@@ -302,6 +298,9 @@ USER: {action_input}
 ASSISTANT:
 """
 
+        output_story = None
+        error_detail = None
+
         with st.spinner("幻想郷の時間を進めています..."):
             try:
                 response = gemini_client.models.generate_content(
@@ -314,17 +313,24 @@ ASSISTANT:
                         safety_settings=CUSTOM_SAFETY_SETTINGS,
                     ),
                 )
-                output_story = response.text.strip() if response.text else None
-            except Exception as e:
-                output_story = None
 
-        # 安全ガード：もしGeminiからテキストが返らなかった場合の処理
+                if response.text:
+                    output_story = response.text.strip()
+                elif response.candidates:
+                    finish_reason = getattr(
+                        response.candidates[0], "finish_reason", "UNKNOWN"
+                    )
+                    error_detail = f"AI応答中断（理由: {finish_reason}）。過激な単語や年齢を連想させる表現に触れた可能性があります。"
+                else:
+                    error_detail = "AIから応答候補が返されませんでした（プロンプト自体のポリシー遮断の可能性）。"
+
+            except Exception as e:
+                error_detail = f"API通信エラー: {str(e)}"
+
         if not output_story:
-            # 入力失敗として直前のユーザー入力を巻き戻す
             st.session_state.messages.pop()
-            st.error(
-                "⚠️ 物語の生成が中断されました。リミット解除しましたがそれでも表現が安全基準に触れたか、APIが一時的に混雑している可能性があります。直前の入力を少し言い換えてもう一度お試しください。"
-            )
+            st.error(f"⚠️ {error_detail}")
+            st.info(f"💡 直前の入力内容: 『{action_input}』")
         else:
             display_novel_entry("assistant", output_story)
 
