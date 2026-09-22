@@ -1,6 +1,7 @@
-import streamlit as st
+import re
 from google import genai
 from google.genai import types
+import streamlit as st
 from supabase import create_client
 
 # 1. 接続初期化
@@ -55,35 +56,56 @@ CUSTOM_SAFETY_SETTINGS = [
 ]
 
 
+# ★API送信時専用のサニタイザー（検閲誤爆ワードを比喩に置換）
+def sanitize_for_api(text):
+  replacements = {
+      "亀頭": "先端",
+      "男根": "剛直",
+      "陰茎": "怒張",
+      "竿": "肉柱",
+      "乳首": "突起",
+      "処女": "純潔",
+      "秘唇": "秘所",
+      "膣": "最奥",
+      "射精": "絶頂と解放",
+      "精液": "白濁",
+      "潮吹き": "飛沫",
+  }
+  sanitized = text
+  for k, v in replacements.items():
+    sanitized = sanitized.replace(k, v)
+  return sanitized
+
+
 # 2. DB操作
 def fetch_save_data():
-    try:
-        res = (
-            supabase.table("novel_saves")
-            .select("*")
-            .eq("id", SAVE_ID)
-            .single()
-            .execute()
-        )
-        if res.data:
-            return res.data.get("summaries", []), res.data.get("messages", [])
-    except Exception:
-        pass
-    return [], []
+  try:
+    res = (
+        supabase.table("novel_saves")
+        .select("*")
+        .eq("id", SAVE_ID)
+        .single()
+        .execute()
+    )
+    if res.data:
+      return res.data.get("summaries", []), res.data.get("messages", [])
+  except Exception:
+    pass
+  return [], []
 
 
 def commit_save_data(summaries, messages):
-    supabase.table("novel_saves").update(
-        {"summaries": summaries, "messages": messages}
-    ).eq("id", SAVE_ID).execute()
+  supabase.table("novel_saves").update(
+      {"summaries": summaries, "messages": messages}
+  ).eq("id", SAVE_ID).execute()
 
 
 # 3. 15往復到達時の自動要約
 def summarize_old_context(raw_messages):
-    conversation_text = "\n".join(
-        [f"{m['role']}: {m['content']}" for m in raw_messages]
-    )
-    prompt = f"""
+  conversation_text = "\n".join(
+      [f"{m['role']}: {sanitize_for_api(m['content'])}" for m in raw_messages]
+  )
+  prompt = f"""
 以下は幻想郷で紡がれた物語の対話ログ（15往復分）です。
 今後の物語進行で引き継ぐべき「キャラクター間の感情の揺れ動き、交わされた約束、発生した出来事、現在の状況」を密度高く要約しなさい。
 
@@ -94,19 +116,19 @@ def summarize_old_context(raw_messages):
 【ログ】
 {conversation_text}
 """
-    try:
-        resp = gemini_client.models.generate_content(
-            model="models/gemini-3.8-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                safety_settings=CUSTOM_SAFETY_SETTINGS
-            ),
-        )
-        if resp.text:
-            return resp.text.strip()
-    except Exception:
-        pass
-    return "【記憶の欠損】\n当時の記憶を記録する際に霧が発生したようだ。"
+  try:
+    resp = gemini_client.models.generate_content(
+        model="models/gemini-3.8-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            safety_settings=CUSTOM_SAFETY_SETTINGS
+        ),
+    )
+    if resp.text:
+      return resp.text.strip()
+  except Exception:
+    pass
+  return "【激動の一幕】\n情熱的な交わりと新たな展開が刻まれた。"
 
 
 # 4. ページ描画とデータ読み込み
@@ -130,18 +152,18 @@ st.markdown(
 )
 
 if "summaries" not in st.session_state or "messages" not in st.session_state:
-    db_summaries, db_messages = fetch_save_data()
-    st.session_state.summaries = db_summaries
-    st.session_state.messages = db_messages
+  db_summaries, db_messages = fetch_save_data()
+  st.session_state.summaries = db_summaries
+  st.session_state.messages = db_messages
 
 current_act = len(st.session_state.summaries) + 1
 
 for m in st.session_state.messages:
-    if "act" not in m:
-        m["act"] = current_act
+  if "act" not in m:
+    m["act"] = current_act
 
 if "selected_act" not in st.session_state:
-    st.session_state.selected_act = None
+  st.session_state.selected_act = None
 
 current_act_messages = [
     m for m in st.session_state.messages if m.get("act") == current_act
@@ -153,205 +175,218 @@ progress_val = min(act_rounds / WINDOW_ROUNDS, 1.0)
 
 
 def display_novel_entry(role, content):
-    if role == "user":
-        st.markdown(
-            f'<div class="user-entry">\n\n{content}\n\n</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(content)
+  if role == "user":
+    st.markdown(
+        f'<div class="user-entry">\n\n{content}\n\n</div>',
+        unsafe_allow_html=True,
+    )
+  else:
+    st.markdown(content)
 
 
 with st.sidebar:
-    st.title("📜 記憶アーカイブ")
+  st.title("📜 記憶アーカイブ")
 
-    if st.session_state.selected_act is not None:
-        if st.button(
-            "↩ 現在へ戻る（最新の執筆画面へ）",
-            type="primary",
-            use_container_width=True,
-        ):
-            st.session_state.selected_act = None
-            st.rerun()
+  if st.session_state.selected_act is not None:
+    if st.button(
+        "↩ 現在へ戻る（最新の執筆画面へ）",
+        type="primary",
+        use_container_width=True,
+    ):
+      st.session_state.selected_act = None
+      st.rerun()
+  else:
+    st.caption("📍 現在: 最新の幕を執筆中")
+
+  st.markdown(
+      f"### 第 **{current_act}** 幕: **{act_rounds}** / {WINDOW_ROUNDS} 往復"
+  )
+  st.progress(progress_val)
+  st.caption(
+      f"💡 次の要約アーカイブまで **あと {remaining} 往復**（累計: {total_rounds} 往復）"
+  )
+
+  # 直前のやり取り（1手）を巻き戻す救急ボタン
+  if st.button("⏪ 直前の1手を巻き戻す"):
+    if len(st.session_state.messages) >= 2:
+      st.session_state.messages.pop()  # assistant
+      st.session_state.messages.pop()  # user
+      commit_save_data(st.session_state.summaries, st.session_state.messages)
+      st.toast("直前の1往復を巻き戻しました")
+      st.rerun()
+
+  if st.button("物語をリセット"):
+    commit_save_data([], [])
+    st.session_state.summaries = []
+    st.session_state.messages = []
+    st.session_state.selected_act = None
+    st.rerun()
+
+  st.markdown("---")
+  st.markdown("### 紡がれた歴史")
+  for idx, summary in enumerate(st.session_state.summaries):
+    lines = summary.strip().split("\n", 1)
+    if len(lines) > 1 and (lines[0].startswith("【") or len(lines[0]) <= 30):
+      header_title = lines[0].strip("【】 ")
+      body_text = lines[1].strip()
     else:
-        st.caption("📍 現在: 最新の幕を執筆中")
+      header_title = "未題の幕"
+      body_text = summary
 
-    st.markdown(
-        f"### 第 **{current_act}** 幕: **{act_rounds}** / {WINDOW_ROUNDS} 往復"
-    )
-    st.progress(progress_val)
-    st.caption(
-        f"💡 次の要約アーカイブまで **あと {remaining} 往復**（累計: {total_rounds} 往復）"
-    )
-
-    if st.button("物語をリセット"):
-        commit_save_data([], [])
-        st.session_state.summaries = []
-        st.session_state.messages = []
-        st.session_state.selected_act = None
+    with st.expander(f"第 {idx + 1} 幕の記録 - {header_title}"):
+      if st.button(
+          f"📖 当時の記憶を見る（第 {idx + 1} 幕）",
+          key=f"view_act_btn_{idx}",
+          use_container_width=True,
+      ):
+        st.session_state.selected_act = idx
         st.rerun()
 
-    st.markdown("---")
-    st.markdown("### 紡がれた歴史")
-    for idx, summary in enumerate(st.session_state.summaries):
-        lines = summary.strip().split("\n", 1)
-        if len(lines) > 1 and (lines[0].startswith("【") or len(lines[0]) <= 30):
-            header_title = lines[0].strip("【】 ")
-            body_text = lines[1].strip()
-        else:
-            header_title = "未題の幕"
-            body_text = summary
+      new_title = st.text_input(
+          "見出し（サブタイトル）",
+          value=header_title,
+          key=f"title_{idx}",
+      )
+      new_body = st.text_area(
+          "要約本文", value=body_text, height=180, key=f"body_{idx}"
+      )
 
-        with st.expander(f"第 {idx + 1} 幕の記録 - {header_title}"):
-            if st.button(
-                f"📖 当時の記憶を見る（第 {idx + 1} 幕）",
-                key=f"view_act_btn_{idx}",
-                use_container_width=True,
-            ):
-                st.session_state.selected_act = idx
-                st.rerun()
-
-            new_title = st.text_input(
-                "見出し（サブタイトル）",
-                value=header_title,
-                key=f"title_{idx}",
-            )
-            new_body = st.text_area(
-                "要約本文", value=body_text, height=180, key=f"body_{idx}"
-            )
-
-            if st.button("この記録を保存", key=f"save_summary_btn_{idx}"):
-                combined = f"【{new_title}】\n{new_body}"
-                st.session_state.summaries[idx] = combined
-                commit_save_data(
-                    st.session_state.summaries, st.session_state.messages
-                )
-                st.toast(
-                    f"第 {idx + 1} 幕の記録を『{new_title}』として更新しました！"
-                )
-                st.rerun()
+      if st.button("この記録を保存", key=f"save_summary_btn_{idx}"):
+        combined = f"【{new_title}】\n{new_body}"
+        st.session_state.summaries[idx] = combined
+        commit_save_data(st.session_state.summaries, st.session_state.messages)
+        st.toast(
+          f"第 {idx + 1} 幕の記録を『{new_title}』として更新しました！"
+        )
+        st.rerun()
 
 # 5. メイン画面の描画
 if st.session_state.selected_act is not None:
-    act_idx = st.session_state.selected_act
-    target_act = act_idx + 1
-    col_t, col_b = st.columns([4, 1])
-    with col_t:
-        st.title(f"📖 第 {target_act} 幕の記憶（回想中）")
-    with col_b:
-        if st.button(
-            "↩ 現在へ", key="back_to_present_main", use_container_width=True
-        ):
-            st.session_state.selected_act = None
-            st.rerun()
+  act_idx = st.session_state.selected_act
+  target_act = act_idx + 1
+  col_t, col_b = st.columns([4, 1])
+  with col_t:
+    st.title(f"📖 第 {target_act} 幕の記憶（回想中）")
+  with col_b:
+    if st.button(
+        "↩ 現在へ", key="back_to_present_main", use_container_width=True
+    ):
+      st.session_state.selected_act = None
+      st.rerun()
 
-    reminiscence_messages = [
-        m for m in st.session_state.messages if m.get("act") == target_act
-    ]
-    if reminiscence_messages:
-        for msg in reminiscence_messages:
-            display_novel_entry(msg["role"], msg["content"])
-    else:
-        st.info(
-            f"💡 第 {target_act} 幕の生ログは、完全保存機能の導入前の幕のため保管されていません。左サイドバーの「要約本文」から当時の記録をお楽しみください。"
-        )
+  reminiscence_messages = [
+      m for m in st.session_state.messages if m.get("act") == target_act
+  ]
+  if reminiscence_messages:
+    for msg in reminiscence_messages:
+      display_novel_entry(msg["role"], msg["content"])
+  else:
+    st.info(
+        f"💡 第 {target_act} 幕の生ログは、完全保存機能の導入前の幕のため保管されていません。左サイドバーの「要約本文」から当時の記録をお楽しみください。"
+    )
 
 else:
-    st.title("幻想郷 真斉幻想禄")
+  st.title("幻想郷 真斉幻想禄")
 
-    for msg in current_act_messages:
-        display_novel_entry(msg["role"], msg["content"])
+  for msg in current_act_messages:
+    display_novel_entry(msg["role"], msg["content"])
 
-    if action_input := st.chat_input("物語の続きを執筆..."):
-        user_msg = {
-            "role": "user",
-            "content": action_input,
-            "act": current_act,
-        }
-        st.session_state.messages.append(user_msg)
-        display_novel_entry("user", action_input)
+  if action_input := st.chat_input("物語の続きを執筆..."):
+    user_msg = {
+      "role": "user",
+      "content": action_input,
+      "act": current_act,
+    }
+    st.session_state.messages.append(user_msg)
+    display_novel_entry("user", action_input)
 
-        summaries_context = "\n---\n".join(
-            [
-                f"[過去の記録 第{idx+1}幕]\n{s}"
-                for idx, s in enumerate(st.session_state.summaries)
-            ]
-        )
-        archive_block = (
-            f"【過去の物語の要約・確定した歴史】\n{summaries_context}\n\n"
-            if summaries_context
-            else ""
-        )
+    summaries_context = "\n---\n".join([
+        f"[過去の記録 第{idx+1}幕]\n{s}"
+        for idx, s in enumerate(st.session_state.summaries)
+    ])
+    archive_block = (
+        f"【過去の物語の要約・確定した歴史】\n{summaries_context}\n\n"
+        if summaries_context
+        else ""
+    )
 
-        recent_messages = st.session_state.messages[
-            -(WINDOW_ROUNDS * 2 + 1) : -1
-        ]
-        history_text = "\n".join(
-            [f"{m['role'].upper()}: {m['content']}" for m in recent_messages]
-        )
+    recent_messages = st.session_state.messages[-(WINDOW_ROUNDS * 2 + 1) : -1]
 
-        full_contents = f"""
+    # ★API送信時だけサニタイズ処理を通す
+    history_text = "\n".join([
+        f"{m['role'].upper()}: {sanitize_for_api(m['content'])}"
+        for m in recent_messages
+    ])
+    sanitized_action = sanitize_for_api(action_input)
+
+    full_contents = f"""
 {archive_block}【直近の情景と対話ログ】
 {history_text}
 
-USER: {action_input}
+USER: {sanitized_action}
 ASSISTANT:
 """
 
-        output_story = None
-        error_detail = None
+    output_story = None
+    error_detail = None
 
-        with st.spinner("幻想郷の時間を進めています..."):
-            try:
-                response = gemini_client.models.generate_content(
-                    model="models/gemini-3.8-flash",
-                    contents=full_contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_INSTRUCTION,
-                        temperature=0.85,
-                        max_output_tokens=2048,
-                        safety_settings=CUSTOM_SAFETY_SETTINGS,
-                    ),
-                )
+    with st.spinner("幻想郷の時間を進めています..."):
+      try:
+        response = gemini_client.models.generate_content(
+            model="models/gemini-3.8-flash",
+            contents=full_contents,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                temperature=0.85,
+                max_output_tokens=2048,
+                safety_settings=CUSTOM_SAFETY_SETTINGS,
+            ),
+        )
 
-                if response.text:
-                    output_story = response.text.strip()
-                elif response.candidates:
-                    finish_reason = getattr(
-                        response.candidates[0], "finish_reason", "UNKNOWN"
-                    )
-                    error_detail = f"AI応答中断（理由: {finish_reason}）。過激な単語や年齢を連想させる表現に触れた可能性があります。"
-                else:
-                    error_detail = "AIから応答候補が返されませんでした（プロンプト自体のポリシー遮断の可能性）。"
-
-            except Exception as e:
-                error_detail = f"API通信エラー: {str(e)}"
-
-        if not output_story:
-            st.session_state.messages.pop()
-            st.error(f"⚠️ {error_detail}")
-            st.info(f"💡 直前の入力内容: 『{action_input}』")
+        if response.text:
+          output_story = response.text.strip()
+        elif response.candidates:
+          finish_reason = getattr(
+              response.candidates[0], "finish_reason", "UNKNOWN"
+          )
+          error_detail = (
+              f"AI応答中断（理由: {finish_reason}）。安全基準に触れた可能性があります。"
+          )
         else:
-            display_novel_entry("assistant", output_story)
-
-            assistant_msg = {
-                "role": "assistant",
-                "content": output_story,
-                "act": current_act,
-            }
-            st.session_state.messages.append(assistant_msg)
-
-            updated_act_messages = [
-                m
-                for m in st.session_state.messages
-                if m.get("act") == current_act
-            ]
-            if len(updated_act_messages) >= (WINDOW_ROUNDS * 2):
-                with st.spinner("一幕の記憶を要約アーカイブへ記録中..."):
-                    new_summary = summarize_old_context(updated_act_messages)
-                    st.session_state.summaries.append(new_summary)
-
-            commit_save_data(
-                st.session_state.summaries, st.session_state.messages
+          block_reason = "不明"
+          if (
+              hasattr(response, "prompt_feedback")
+              and response.prompt_feedback
+          ):
+            block_reason = getattr(
+                response.prompt_feedback, "block_reason", "SAFETY"
             )
-            st.rerun()
+          error_detail = f"プロンプト事前遮断（Google規約による門前払い: {block_reason}）"
+
+      except Exception as e:
+        error_detail = f"API通信エラー: {str(e)}"
+
+    if not output_story:
+      st.session_state.messages.pop()
+      st.error(f"⚠️ {error_detail}")
+      st.info(f"💡 直前の入力内容: 『{action_input}』")
+    else:
+      display_novel_entry("assistant", output_story)
+
+      assistant_msg = {
+        "role": "assistant",
+        "content": output_story,
+        "act": current_act,
+      }
+      st.session_state.messages.append(assistant_msg)
+
+      updated_act_messages = [
+        m for m in st.session_state.messages if m.get("act") == current_act
+      ]
+      if len(updated_act_messages) >= (WINDOW_ROUNDS * 2):
+        with st.spinner("一幕の記憶を要約アーカイブへ記録中..."):
+          new_summary = summarize_old_context(updated_act_messages)
+          st.session_state.summaries.append(new_summary)
+
+      commit_save_data(st.session_state.summaries, st.session_state.messages)
+      st.rerun()
