@@ -1,5 +1,6 @@
 import streamlit as st
 from google import genai
+from google.genai import types
 from supabase import create_client
 
 # 1. 接続初期化
@@ -26,6 +27,30 @@ SYSTEM_INSTRUCTION = """
 - キャラクターは東方Projectの設定から考えられる人格であり、知性も原作を踏襲し、自然な会話を描写すること。キャラクターが生きた長さを実感させる知見あるいは未熟な部分を描写してキャラクターの実感を持たせること。
 - キャラクターの日常や幻想郷の日常を極端に曲げないこと。
 """
+
+# セーフティフィルターの制限を全解除
+CUSTOM_SAFETY_SETTINGS = [
+    types.SafetySetting(
+        category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+        threshold=types.HarmBlockThreshold.BLOCK_NONE,
+    ),
+    types.SafetySetting(
+        category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+        threshold=types.HarmBlockThreshold.BLOCK_NONE,
+    ),
+    types.SafetySetting(
+        category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+        threshold=types.HarmBlockThreshold.BLOCK_NONE,
+    ),
+    types.SafetySetting(
+        category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        threshold=types.HarmBlockThreshold.BLOCK_NONE,
+    ),
+    types.SafetySetting(
+        category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
+        threshold=types.HarmBlockThreshold.BLOCK_NONE,
+    ),
+]
 
 
 # 2. DB操作
@@ -67,10 +92,19 @@ def summarize_old_context(raw_messages):
 【ログ】
 {conversation_text}
 """
-    resp = gemini_client.models.generate_content(
-        model="models/gemini-3.8-flash", contents=prompt
-    )
-    return resp.text.strip()
+    try:
+        resp = gemini_client.models.generate_content(
+            model="models/gemini-3.8-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                safety_settings=CUSTOM_SAFETY_SETTINGS
+            ),
+        )
+        if resp.text:
+            return resp.text.strip()
+    except Exception:
+        pass
+    return "【記憶の欠損】\n当時の記憶を記録する際に霧が発生したようだ。"
 
 
 # 4. ページ描画とデータ読み込み
@@ -268,32 +302,49 @@ ASSISTANT:
 """
 
         with st.spinner("幻想郷の時間を進めています..."):
-            response = gemini_client.models.generate_content(
-                model="models/gemini-3.8-flash",
-                contents=full_contents,
-                config=genai.types.GenerateContentConfig(
-                    system_instruction=SYSTEM_INSTRUCTION,
-                    temperature=0.85,
-                    max_output_tokens=2048,
-                ),
+            try:
+                response = gemini_client.models.generate_content(
+                    model="models/gemini-3.8-flash",
+                    contents=full_contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_INSTRUCTION,
+                        temperature=0.85,
+                        max_output_tokens=2048,
+                        safety_settings=CUSTOM_SAFETY_SETTINGS,
+                    ),
+                )
+                output_story = response.text.strip() if response.text else None
+            except Exception as e:
+                output_story = None
+
+        # 安全ガード：もしGeminiからテキストが返らなかった場合の処理
+        if not output_story:
+            # 入力失敗として直前のユーザー入力を巻き戻す
+            st.session_state.messages.pop()
+            st.error(
+                "⚠️ 物語の生成が中断されました。リミット解除しましたがそれでも表現が安全基準に触れたか、APIが一時的に混雑している可能性があります。直前の入力を少し言い換えてもう一度お試しください。"
             )
-            output_story = response.text.strip()
+        else:
             display_novel_entry("assistant", output_story)
 
-        assistant_msg = {
-            "role": "assistant",
-            "content": output_story,
-            "act": current_act,
-        }
-        st.session_state.messages.append(assistant_msg)
+            assistant_msg = {
+                "role": "assistant",
+                "content": output_story,
+                "act": current_act,
+            }
+            st.session_state.messages.append(assistant_msg)
 
-        updated_act_messages = [
-            m for m in st.session_state.messages if m.get("act") == current_act
-        ]
-        if len(updated_act_messages) >= (WINDOW_ROUNDS * 2):
-            with st.spinner("一幕の記憶を要約アーカイブへ記録中..."):
-                new_summary = summarize_old_context(updated_act_messages)
-                st.session_state.summaries.append(new_summary)
+            updated_act_messages = [
+                m
+                for m in st.session_state.messages
+                if m.get("act") == current_act
+            ]
+            if len(updated_act_messages) >= (WINDOW_ROUNDS * 2):
+                with st.spinner("一幕の記憶を要約アーカイブへ記録中..."):
+                    new_summary = summarize_old_context(updated_act_messages)
+                    st.session_state.summaries.append(new_summary)
 
-        commit_save_data(st.session_state.summaries, st.session_state.messages)
-        st.rerun()
+            commit_save_data(
+                st.session_state.summaries, st.session_state.messages
+            )
+            st.rerun()
