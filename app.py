@@ -42,27 +42,27 @@ SYSTEM_INSTRUCTION = """
 - キャラクターのセリフ「～」中または心理描写(～)中の恥じらいの表現は/を連続して使い、数でどれほどの恥じらいか示すこと。
 """
 
-# セーフティフィルター全解除
+# セーフティフィルター全解除（公式最新仕様の OFF に統一）
 CUSTOM_SAFETY_SETTINGS = [
     types.SafetySetting(
         category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-        threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        threshold=types.HarmBlockThreshold.OFF,
     ),
     types.SafetySetting(
         category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-        threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        threshold=types.HarmBlockThreshold.OFF,
     ),
     types.SafetySetting(
         category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
-        threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        threshold=types.HarmBlockThreshold.OFF,
     ),
     types.SafetySetting(
         category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-        threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        threshold=types.HarmBlockThreshold.OFF,
     ),
     types.SafetySetting(
         category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
-        threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        threshold=types.HarmBlockThreshold.OFF,
     ),
 ]
 
