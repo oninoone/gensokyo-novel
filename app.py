@@ -344,7 +344,7 @@ ASSISTANT:
     with st.spinner("幻想郷の時間を進めています..."):
       try:
         response = gemini_client.models.generate_content(
-            model="models/gemini-3.8-flash",
+            model="models/gemini-4-argon",
             contents=full_contents,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
