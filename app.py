@@ -9,7 +9,7 @@ gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
 SAVE_ID = "main_story"
-WINDOW_ROUNDS = 15  # 15往復（30メッセージ）を一幕として管理
+WINDOW_ROUNDS = 10  # 10往復（20メッセージ）を一幕として管理
 
 SYSTEM_INSTRUCTION = """
 あなたは幻想郷を舞台とした東方Project二次創作ノベルの共同執筆者（ゲームマスター）です。
@@ -19,7 +19,7 @@ SYSTEM_INSTRUCTION = """
 - 真斉の設定：20代後半の顔立ちの良い青年で、少し細身で鍛えている。
 
 【執筆ルール】
-- 1回の出力はおよそ800〜1200文字程度の濃密な文量とすること。
+- 1回の出力はおよそ600〜900文字程度の濃密な文量とすること。
 - 台詞は キャラ名「〜」の形式とし、キャラクター同士の掛け合いや間合い、視線の動きを生き生きと描写すること。
 - 文章の一番最初に日時(〇年〇月〇日、24；00表記)と場所、天候を箇条書きに描写すること。
 - 真斉のアクションを活かし、状況や感情の機微を前進させること。
@@ -117,7 +117,7 @@ def summarize_old_context(raw_messages):
       [f"{m['role']}: {sanitize_for_api(m['content'])}" for m in raw_messages]
   )
   prompt = f"""
-以下は幻想郷で紡がれた物語の対話ログ（15往復分）です。
+以下は幻想郷で紡がれた物語の対話ログ（{WINDOW_ROUNDS}往復分）です。
 今後の物語進行で引き継ぐべき「キャラクター間の感情の揺れ動き、交わされた約束、発生した出来事、現在の状況」を密度高く要約しなさい。
 
 【出力フォーマット】
@@ -322,8 +322,14 @@ else:
     )
     # 常に過去30件を引っ張ってくるのでキャッシュが効かないがその分記憶力が良い
     # recent_messages = st.session_state.messages[-(WINDOW_ROUNDS * 2 + 1) : -1]
-    # ★★★現在の幕のここまでのやり取りだけを送るキャッシュを効かせる手法
-    recent_messages = [m for m in st.session_state.messages if m.get("act") == current_act][:-1]
+    # 前の幕のラスト2往復（4件）を「のりしろ」として固定取得＋現在の幕の生ログ
+        prev_act_messages = [
+            m for m in st.session_state.messages if m.get("act") == current_act - 1
+        ][-4:]
+        curr_act_without_last = [
+            m for m in st.session_state.messages if m.get("act") == current_act
+        ][:-1]
+        recent_messages = prev_act_messages + curr_act_without_last
 
     # ★API送信時だけサニタイズ処理を通す
     history_text = "\n".join([
@@ -351,9 +357,9 @@ ASSISTANT:
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
                 temperature=0.85,
-                max_output_tokens=2048,
+                max_output_tokens=4096,
                 # ★★★裏側の思考トークンに上限を設定して出力課金（$10/1M）の暴走を防ぐ
-                thinking_config=types.ThinkingConfig(thinking_budget=1024),
+                thinking_config=types.ThinkingConfig(thinking_budget=2048),
                 safety_settings=CUSTOM_SAFETY_SETTINGS,
             ),
         )
