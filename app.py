@@ -129,7 +129,7 @@ def summarize_old_context(raw_messages):
 """
   try:
     resp = gemini_client.models.generate_content(
-        model="models/gemini-3.8-flash",
+        model="models/gemini-4-argon",
         contents=prompt,
         config=types.GenerateContentConfig(
             safety_settings=CUSTOM_SAFETY_SETTINGS
