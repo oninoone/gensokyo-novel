@@ -111,7 +111,7 @@ def commit_save_data(summaries, messages):
   ).eq("id", SAVE_ID).execute()
 
 
-# 3. 15往復到達時の自動要約
+# 3. 10往復到達時の自動要約
 def summarize_old_context(raw_messages):
   conversation_text = "\n".join(
       [f"{m['role']}: {sanitize_for_api(m['content'])}" for m in raw_messages]
@@ -323,13 +323,13 @@ else:
     # 常に過去30件を引っ張ってくるのでキャッシュが効かないがその分記憶力が良い
     # recent_messages = st.session_state.messages[-(WINDOW_ROUNDS * 2 + 1) : -1]
     # 前の幕のラスト2往復（4件）を「のりしろ」として固定取得＋現在の幕の生ログ
-        prev_act_messages = [
-            m for m in st.session_state.messages if m.get("act") == current_act - 1
-        ][-4:]
-        curr_act_without_last = [
-            m for m in st.session_state.messages if m.get("act") == current_act
-        ][:-1]
-        recent_messages = prev_act_messages + curr_act_without_last
+    prev_act_messages = [
+        m for m in st.session_state.messages if m.get("act") == current_act - 1
+    ][-4:]
+    curr_act_without_last = [
+        m for m in st.session_state.messages if m.get("act") == current_act
+    ][:-1]
+    recent_messages = prev_act_messages + curr_act_without_last
 
     # ★API送信時だけサニタイズ処理を通す
     history_text = "\n".join([
