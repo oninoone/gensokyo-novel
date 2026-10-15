@@ -320,8 +320,10 @@ else:
         if summaries_context
         else ""
     )
-
-    recent_messages = st.session_state.messages[-(WINDOW_ROUNDS * 2 + 1) : -1]
+    # 常に過去30件を引っ張ってくるのでキャッシュが効かないがその分記憶力が良い
+    # recent_messages = st.session_state.messages[-(WINDOW_ROUNDS * 2 + 1) : -1]
+    # ★★★現在の幕のここまでのやり取りだけを送るキャッシュを効かせる手法
+    recent_messages = [m for m in st.session_state.messages if m.get("act") == current_act][:-1]
 
     # ★API送信時だけサニタイズ処理を通す
     history_text = "\n".join([
@@ -350,6 +352,8 @@ ASSISTANT:
                 system_instruction=SYSTEM_INSTRUCTION,
                 temperature=0.85,
                 max_output_tokens=2048,
+                # ★★★裏側の思考トークンに上限を設定して出力課金（$10/1M）の暴走を防ぐ
+                thinking_config=types.ThinkingConfig(thinking_budget=1024),
                 safety_settings=CUSTOM_SAFETY_SETTINGS,
             ),
         )
