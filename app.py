@@ -231,9 +231,9 @@ with st.sidebar:
   st.progress(progress_val)
   st.caption(
       f"💡 次の要約アーカイブまで **あと {remaining} 往復**（累計: {total_rounds} 往復）"
-      if "last_cost_info" in st.session_state:
-        st.info(st.session_state.last_cost_info)
   )
+  if "last_cost_info" in st.session_state:
+    st.info(st.session_state.last_cost_info)
 
   # 直前のやり取り（1手）を巻き戻す救急ボタン
   if st.button("⏪ 直前の1手を巻き戻す"):
@@ -358,7 +358,7 @@ else:
         else ""
     )
 
-   # ★2. 要約の確実な文字数圧縮：直近3幕は全文、それ以前の古い幕は「見出し＋末尾70文字」に強制ダイエット
+    # ★2. 要約の確実な文字数圧縮：直近3幕は全文、それ以前の古い幕は「見出し＋末尾70文字」に強制ダイエット
     total_summaries = len(st.session_state.summaries)
     compressed_summaries = []
     for idx, s in enumerate(st.session_state.summaries):
