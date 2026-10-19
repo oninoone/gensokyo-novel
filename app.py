@@ -231,8 +231,8 @@ with st.sidebar:
   st.progress(progress_val)
   st.caption(
       f"💡 次の要約アーカイブまで **あと {remaining} 往復**（累計: {total_rounds} 往復）"
-      if "last_cost_info" in st.session_state:
-      st.info(st.session_state.last_cost_info)
+  if "last_cost_info" in st.session_state:
+  st.info(st.session_state.last_cost_info)
   )
 
   # 直前のやり取り（1手）を巻き戻す救急ボタン
