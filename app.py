@@ -111,6 +111,22 @@ def commit_save_data(summaries, messages):
   ).eq("id", SAVE_ID).execute()
 
 
+def get_world_memo(messages):
+  for m in messages:
+    if m.get("act") == -1 and m.get("role") == "memo":
+      return m.get("content", "")
+  return ""
+
+
+def set_world_memo(messages, new_memo):
+  filtered = [
+      m for m in messages if not (m.get("act") == -1 and m.get("role") == "memo")
+  ]
+  if new_memo.strip():
+    filtered.insert(0, {"role": "memo", "content": new_memo.strip(), "act": -1})
+  return filtered
+
+
 # 3. 10往復到達時の自動要約
 def summarize_old_context(raw_messages):
   conversation_text = "\n".join(
@@ -122,7 +138,7 @@ def summarize_old_context(raw_messages):
 
 【出力フォーマット】
 1行目：この一幕の出来事を象徴する魅力的な見出し（20文字以内、例：【魔法の森の邂逅とアリスの実験】）
-2行目以降：400〜600文字程度の要約本文（末尾に必ず「最終時点の日時・場所・天候・直前の状況」を明記すること）
+2行目以降：400〜600文字程度の要約本文（末尾の最終行に必ず「最終時点の日時・場所・天候・直前の状況」を1行で明記すること）
 
 【ログ】
 {conversation_text}
@@ -219,7 +235,8 @@ with st.sidebar:
 
   # 直前のやり取り（1手）を巻き戻す救急ボタン
   if st.button("⏪ 直前の1手を巻き戻す"):
-    if len(st.session_state.messages) >= 2:
+    chat_msgs = [m for m in st.session_state.messages if m.get("act", 1) > 0]
+    if len(chat_msgs) >= 2:
       st.session_state.messages.pop()  # assistant
       st.session_state.messages.pop()  # user
       commit_save_data(st.session_state.summaries, st.session_state.messages)
@@ -232,6 +249,26 @@ with st.sidebar:
     st.session_state.messages = []
     st.session_state.selected_act = None
     st.rerun()
+
+  st.markdown("---")
+  # ★新設：絶対に忘れてほしくない基本設定・関係性メモ枠
+  with st.expander("📌 基本設定・関係性メモ（常時読込）", expanded=False):
+    st.caption("拠点、各キャラとの現在の関係性や約束など、常にAIに意識させたい不変設定を記録します。")
+    current_memo = get_world_memo(st.session_state.messages)
+    memo_input = st.text_area(
+        "基本設定メモ",
+        value=current_memo,
+        height=200,
+        key="world_memo_input",
+        placeholder="例：\n・現在の拠点：魔法の森のアリス邸\n・アリス：真斉と深い情愛関係にあり、同居中。\n・レミリア：紅魔館の主。真斉に興味を持ち夜会に招いている。",
+    )
+    if st.button("基本設定メモを保存", use_container_width=True):
+      st.session_state.messages = set_world_memo(
+          st.session_state.messages, memo_input
+      )
+      commit_save_data(st.session_state.summaries, st.session_state.messages)
+      st.toast("📌 基本設定・関係性メモを保存しました！")
+      st.rerun()
 
   st.markdown("---")
   st.markdown("### 紡がれた歴史")
@@ -267,7 +304,7 @@ with st.sidebar:
         st.session_state.summaries[idx] = combined
         commit_save_data(st.session_state.summaries, st.session_state.messages)
         st.toast(
-          f"第 {idx + 1} 幕の記録を『{new_title}』として更新しました！"
+            f"第 {idx + 1} 幕の記録を『{new_title}』として更新しました！"
         )
         st.rerun()
 
@@ -304,28 +341,49 @@ else:
 
   if action_input := st.chat_input("物語の続きを執筆..."):
     user_msg = {
-      "role": "user",
-      "content": action_input,
-      "act": current_act,
+        "role": "user",
+        "content": action_input,
+        "act": current_act,
     }
     st.session_state.messages.append(user_msg)
     display_novel_entry("user", action_input)
 
-    summaries_context = "\n---\n".join([
-        f"[過去の記録 第{idx+1}幕]\n{s}"
-        for idx, s in enumerate(st.session_state.summaries)
-    ])
+    # ★1. 基本設定・関係性メモの読み込み（サニタイズ適用）
+    raw_memo = get_world_memo(st.session_state.messages)
+    memo_block = (
+        f"【不変の基本設定・キャラクター関係性メモ】\n{sanitize_for_api(raw_memo)}\n\n"
+        if raw_memo
+        else ""
+    )
+
+    # ★2. 要約のメリハリ圧縮：直近5幕は全文、それ以前の古い幕は「見出し＋最終行」に圧縮
+    total_summaries = len(st.session_state.summaries)
+    compressed_summaries = []
+    for idx, s in enumerate(st.session_state.summaries):
+      sanitized_s = sanitize_for_api(s)
+      if idx >= total_summaries - 5:
+        compressed_summaries.append(f"[過去の記録 第{idx+1}幕]\n{sanitized_s}")
+      else:
+        lines = [
+            line.strip() for line in sanitized_s.strip().split("\n") if line.strip()
+        ]
+        header = lines[0] if lines else "記録"
+        last_line = lines[-1] if len(lines) > 1 else ""
+        compressed_summaries.append(
+            f"[第{idx+1}幕（抜粋）] {header} / {last_line}"
+        )
+
+    summaries_context = "\n---\n".join(compressed_summaries)
     archive_block = (
         f"【過去の物語の要約・確定した歴史】\n{summaries_context}\n\n"
         if summaries_context
         else ""
     )
-    # 常に過去30件を引っ張ってくるのでキャッシュが効かないがその分記憶力が良い
-    # recent_messages = st.session_state.messages[-(WINDOW_ROUNDS * 2 + 1) : -1]
-    # 前の幕のラスト2往復（4件）を「のりしろ」として固定取得＋現在の幕の生ログ
+
+    # ★3. のりしろ（前の幕のラスト1往復＝2件）を固定し、現在の幕の生ログを結合（先頭ズレを防ぎキャッシュを効かせる）
     prev_act_messages = [
         m for m in st.session_state.messages if m.get("act") == current_act - 1
-    ][-4:]
+    ][-2:]
     curr_act_without_last = [
         m for m in st.session_state.messages if m.get("act") == current_act
     ][:-1]
@@ -339,7 +397,7 @@ else:
     sanitized_action = sanitize_for_api(action_input)
 
     full_contents = f"""
-{archive_block}【直近の情景と対話ログ】
+{memo_block}{archive_block}【直近の情景と対話ログ】
 {history_text}
 
 USER: {sanitized_action}
@@ -358,8 +416,8 @@ ASSISTANT:
                 system_instruction=SYSTEM_INSTRUCTION,
                 temperature=0.85,
                 max_output_tokens=4096,
-                # ★★★裏側の思考トークンに上限を設定して出力課金（$10/1M）の暴走を防ぐ
-                thinking_config=types.ThinkingConfig(thinking_budget=2048),
+                # ★機微を保ちつつ思考コストを抑える1536トークン設定
+                thinking_config=types.ThinkingConfig(thinking_budget=1536),
                 safety_settings=CUSTOM_SAFETY_SETTINGS,
             ),
         )
@@ -395,14 +453,14 @@ ASSISTANT:
       display_novel_entry("assistant", output_story)
 
       assistant_msg = {
-        "role": "assistant",
-        "content": output_story,
-        "act": current_act,
+          "role": "assistant",
+          "content": output_story,
+          "act": current_act,
       }
       st.session_state.messages.append(assistant_msg)
 
       updated_act_messages = [
-        m for m in st.session_state.messages if m.get("act") == current_act
+          m for m in st.session_state.messages if m.get("act") == current_act
       ]
       if len(updated_act_messages) >= (WINDOW_ROUNDS * 2):
         with st.spinner("一幕の記憶を要約アーカイブへ記録中..."):
