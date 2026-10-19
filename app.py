@@ -10,7 +10,7 @@ supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
 SAVE_ID = "main_story"
 WINDOW_ROUNDS = 10  # 10往復（20メッセージ）を一幕として管理
-USD_JPY = 158.24  # 現在の為替レート
+USD_JPY = 158.58  # 現在の為替レート
 
 SYSTEM_INSTRUCTION = """
 あなたは幻想郷を舞台とした東方Project二次創作ノベルの共同執筆者（ゲームマスター）です。
