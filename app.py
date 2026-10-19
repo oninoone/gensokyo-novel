@@ -261,6 +261,9 @@ with st.sidebar:
   )
   if "last_cost_info" in st.session_state:
     st.info(st.session_state.last_cost_info)
+  if "raw_usage" in st.session_state:
+    with st.expander("🔍 API生データ（トークン内訳）"):
+      st.code(st.session_state.raw_usage)
 
   # 直前のやり取り（1手）を巻き戻す救急ボタン
   if st.button("⏪ 直前の1手を巻き戻す"):
@@ -512,6 +515,8 @@ ASSISTANT:
           f"- 入力: {un_in_tok:,} tok (キャッシュ: {cache_tok:,} tok)\n"
           f"- 思考(逆算含): {th_tok:,} tok / 本文: {out_tok:,} tok"
       )
+      # ★APIが返してきた生のトークン明細を丸ごと保存
+      st.session_state.raw_usage = str(getattr(response, "usage_metadata", "データなし"))
 
       commit_save_data(st.session_state.summaries, st.session_state.messages)
       st.rerun()
