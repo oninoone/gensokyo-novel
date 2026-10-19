@@ -231,6 +231,8 @@ with st.sidebar:
   st.progress(progress_val)
   st.caption(
       f"💡 次の要約アーカイブまで **あと {remaining} 往復**（累計: {total_rounds} 往復）"
+      if "last_cost_info" in st.session_state:
+      st.info(st.session_state.last_cost_info)
   )
 
   # 直前のやり取り（1手）を巻き戻す救急ボタン
@@ -356,21 +358,22 @@ else:
         else ""
     )
 
-    # ★2. 要約のメリハリ圧縮：直近5幕は全文、それ以前の古い幕は「見出し＋最終行」に圧縮
+   # ★2. 要約の確実な文字数圧縮：直近3幕は全文、それ以前の古い幕は「見出し＋末尾70文字」に強制ダイエット
     total_summaries = len(st.session_state.summaries)
     compressed_summaries = []
     for idx, s in enumerate(st.session_state.summaries):
       sanitized_s = sanitize_for_api(s)
-      if idx >= total_summaries - 5:
+      if idx >= total_summaries - 3:
         compressed_summaries.append(f"[過去の記録 第{idx+1}幕]\n{sanitized_s}")
       else:
         lines = [
             line.strip() for line in sanitized_s.strip().split("\n") if line.strip()
         ]
         header = lines[0] if lines else "記録"
-        last_line = lines[-1] if len(lines) > 1 else ""
+        body_flat = "".join(lines[1:]) if len(lines) > 1 else ""
+        tail_text = body_flat[-70:] if len(body_flat) > 70 else body_flat
         compressed_summaries.append(
-            f"[第{idx+1}幕（抜粋）] {header} / {last_line}"
+            f"[第{idx+1}幕（抜粋）] {header} / …{tail_text}"
         )
 
     summaries_context = "\n---\n".join(compressed_summaries)
@@ -380,14 +383,14 @@ else:
         else ""
     )
 
-    # ★3. のりしろ（前の幕のラスト1往復＝2件）を固定し、現在の幕の生ログを結合（先頭ズレを防ぎキャッシュを効かせる）
+    # ★3. のりしろ（前の幕のラスト1往復＝2件）＋現在幕の生ログ（合計最大10件＝5往復までに制限）
     prev_act_messages = [
         m for m in st.session_state.messages if m.get("act") == current_act - 1
     ][-2:]
     curr_act_without_last = [
         m for m in st.session_state.messages if m.get("act") == current_act
     ][:-1]
-    recent_messages = prev_act_messages + curr_act_without_last
+    recent_messages = (prev_act_messages + curr_act_without_last)[-10:]
 
     # ★API送信時だけサニタイズ処理を通す
     history_text = "\n".join([
@@ -421,6 +424,27 @@ ASSISTANT:
                 safety_settings=CUSTOM_SAFETY_SETTINGS,
             ),
         )
+
+        # ★APIから返ってきた正確なトークン消費量と金額（1ドル=158.24円）を計算して記録
+        if hasattr(response, "usage_metadata") and response.usage_metadata:
+          u = response.usage_metadata
+          in_tok = getattr(u, "prompt_token_count", 0) or 0
+          cache_tok = getattr(u, "cached_content_token_count", 0) or 0
+          un_in_tok = max(0, in_tok - cache_tok)
+          out_tok = getattr(u, "candidates_token_count", 0) or 0
+          th_tok = getattr(u, "thoughts_token_count", 0) or 0
+
+          usd_cost = (
+              (un_in_tok * 2.0 / 1_000_000)
+              + (cache_tok * 0.10 / 1_000_000)
+              + ((out_tok + th_tok) * 10.0 / 1_000_000)
+          )
+          jpy_cost = usd_cost * 158.24
+          st.session_state.last_cost_info = (
+              f"💰 直前ラリー: **約 {jpy_cost:.2f} 円**\n"
+              f"- 入力: {un_in_tok:,} tok (キャッシュ: {cache_tok:,} tok)\n"
+              f"- 思考: {th_tok:,} tok / 本文: {out_tok:,} tok"
+          )
 
         if response.text:
           output_story = response.text.strip()
