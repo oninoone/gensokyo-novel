@@ -10,6 +10,7 @@ supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
 SAVE_ID = "main_story"
 WINDOW_ROUNDS = 10  # 10往復（20メッセージ）を一幕として管理
+USD_JPY = 158.24  # 現在の為替レート
 
 SYSTEM_INSTRUCTION = """
 あなたは幻想郷を舞台とした東方Project二次創作ノベルの共同執筆者（ゲームマスター）です。
@@ -88,6 +89,29 @@ def sanitize_for_api(text):
   return sanitized
 
 
+# ★usage_metadataから隠れ思考トークンを含めて正確に料金を計算する関数
+def calc_usage_cost(usage_meta):
+  if not usage_meta:
+    return 0.0, 0, 0, 0, 0
+  in_tok = getattr(usage_meta, "prompt_token_count", 0) or 0
+  cache_tok = getattr(usage_meta, "cached_content_token_count", 0) or 0
+  out_tok = getattr(usage_meta, "candidates_token_count", 0) or 0
+  total_tok = getattr(usage_meta, "total_token_count", 0) or 0
+  th_tok = getattr(usage_meta, "thoughts_token_count", 0) or 0
+
+  # thoughts_token_count が 0 でも total_token_count との差分から隠れ思考トークンを強制捕捉
+  if th_tok == 0 and total_tok > (in_tok + out_tok):
+    th_tok = total_tok - in_tok - out_tok
+
+  un_in_tok = max(0, in_tok - cache_tok)
+  usd = (
+      (un_in_tok * 2.0 / 1_000_000)
+      + (cache_tok * 0.10 / 1_000_000)
+      + ((out_tok + th_tok) * 10.0 / 1_000_000)
+  )
+  return usd * USD_JPY, un_in_tok, cache_tok, th_tok, out_tok
+
+
 # 2. DB操作
 def fetch_save_data():
   try:
@@ -151,11 +175,14 @@ def summarize_old_context(raw_messages):
             safety_settings=CUSTOM_SAFETY_SETTINGS
         ),
     )
+    sum_cost, _, _, _, _ = calc_usage_cost(
+        getattr(resp, "usage_metadata", None)
+    )
     if resp.text:
-      return resp.text.strip()
+      return resp.text.strip(), sum_cost
   except Exception:
     pass
-  return "【激動の一幕】\n情熱的な交わりと新たな展開が刻まれた。"
+  return "【激動の一幕】\n情熱的な交わりと新たな展開が刻まれた。", 0.0
 
 
 # 4. ページ描画とデータ読み込み
@@ -253,7 +280,7 @@ with st.sidebar:
     st.rerun()
 
   st.markdown("---")
-  # ★新設：絶対に忘れてほしくない基本設定・関係性メモ枠
+  # ★絶対に忘れてほしくない基本設定・関係性メモ枠
   with st.expander("📌 基本設定・関係性メモ（常時読込）", expanded=False):
     st.caption("拠点、各キャラとの現在の関係性や約束など、常にAIに意識させたい不変設定を記録します。")
     current_memo = get_world_memo(st.session_state.messages)
@@ -358,7 +385,7 @@ else:
         else ""
     )
 
-    # ★2. 要約の確実な文字数圧縮：直近3幕は全文、それ以前の古い幕は「見出し＋末尾70文字」に強制ダイエット
+    # ★2. 要約の圧縮（昨夜と同じ設定を維持：直近3幕は全文、古い幕は「見出し＋末尾70文字」で歴史と着地状況を保持）
     total_summaries = len(st.session_state.summaries)
     compressed_summaries = []
     for idx, s in enumerate(st.session_state.summaries):
@@ -383,7 +410,7 @@ else:
         else ""
     )
 
-    # ★3. のりしろ（前の幕のラスト1往復＝2件）＋現在幕の生ログ（合計最大10件＝5往復までに制限）
+    # ★3. 生ログ（昨夜と同じ設定を維持：のりしろ1往復＋現在幕で最大10件＝5往復分）
     prev_act_messages = [
         m for m in st.session_state.messages if m.get("act") == current_act - 1
     ][-2:]
@@ -409,6 +436,8 @@ ASSISTANT:
 
     output_story = None
     error_detail = None
+    jpy_cost = 0.0
+    un_in_tok = cache_tok = th_tok = out_tok = 0
 
     with st.spinner("幻想郷の時間を進めています..."):
       try:
@@ -419,32 +448,16 @@ ASSISTANT:
                 system_instruction=SYSTEM_INSTRUCTION,
                 temperature=0.85,
                 max_output_tokens=4096,
-                # ★機微を保ちつつ思考コストを抑える1536トークン設定
+                # ★思考上限も昨夜と同じ1536トークンを維持
                 thinking_config=types.ThinkingConfig(thinking_budget=1536),
                 safety_settings=CUSTOM_SAFETY_SETTINGS,
             ),
         )
 
-        # ★APIから返ってきた正確なトークン消費量と金額（1ドル=158.24円）を計算して記録
-        if hasattr(response, "usage_metadata") and response.usage_metadata:
-          u = response.usage_metadata
-          in_tok = getattr(u, "prompt_token_count", 0) or 0
-          cache_tok = getattr(u, "cached_content_token_count", 0) or 0
-          un_in_tok = max(0, in_tok - cache_tok)
-          out_tok = getattr(u, "candidates_token_count", 0) or 0
-          th_tok = getattr(u, "thoughts_token_count", 0) or 0
-
-          usd_cost = (
-              (un_in_tok * 2.0 / 1_000_000)
-              + (cache_tok * 0.10 / 1_000_000)
-              + ((out_tok + th_tok) * 10.0 / 1_000_000)
-          )
-          jpy_cost = usd_cost * 158.24
-          st.session_state.last_cost_info = (
-              f"💰 直前ラリー: **約 {jpy_cost:.2f} 円**\n"
-              f"- 入力: {un_in_tok:,} tok (キャッシュ: {cache_tok:,} tok)\n"
-              f"- 思考: {th_tok:,} tok / 本文: {out_tok:,} tok"
-          )
+        # ★total_token_countとの差分から「隠れ思考トークン」を正確に捕捉して計算
+        jpy_cost, un_in_tok, cache_tok, th_tok, out_tok = calc_usage_cost(
+            getattr(response, "usage_metadata", None)
+        )
 
         if response.text:
           output_story = response.text.strip()
@@ -483,13 +496,22 @@ ASSISTANT:
       }
       st.session_state.messages.append(assistant_msg)
 
+      sum_cost = 0.0
       updated_act_messages = [
           m for m in st.session_state.messages if m.get("act") == current_act
       ]
       if len(updated_act_messages) >= (WINDOW_ROUNDS * 2):
         with st.spinner("一幕の記憶を要約アーカイブへ記録中..."):
-          new_summary = summarize_old_context(updated_act_messages)
+          new_summary, sum_cost = summarize_old_context(updated_act_messages)
           st.session_state.summaries.append(new_summary)
+
+      total_turn_cost = jpy_cost + sum_cost
+      sum_note = f" (うち自動要約: {sum_cost:.2f}円)" if sum_cost > 0 else ""
+      st.session_state.last_cost_info = (
+          f"💰 直前ラリー: **約 {total_turn_cost:.2f} 円**{sum_note}\n"
+          f"- 入力: {un_in_tok:,} tok (キャッシュ: {cache_tok:,} tok)\n"
+          f"- 思考(逆算含): {th_tok:,} tok / 本文: {out_tok:,} tok"
+      )
 
       commit_save_data(st.session_state.summaries, st.session_state.messages)
       st.rerun()
