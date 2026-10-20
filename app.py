@@ -533,7 +533,7 @@ else:
 
     # ★空白（スペースのみ）で送信された場合、AIが過激方向に暴走しないよう自然な繋ぎ文を補完
     if not action_input.strip():
-      sanitized_action = "（真斉は落ち着いた笑みを浮かべ、状況を見守りながら穏やかに応じる）"
+      sanitized_action = "（状況を進める。）"
     else:
       sanitized_action = sanitize_for_api(action_input)
 
