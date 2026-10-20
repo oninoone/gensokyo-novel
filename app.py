@@ -531,12 +531,6 @@ else:
     ][:-1]
     all_recent_candidates = prev_act_messages + curr_act_without_last
 
-    # ★空白（スペースのみ）で送信された場合、AIが過激方向に暴走しないよう自然な繋ぎ文を補完
-    if not action_input.strip():
-      sanitized_action = "（状況を進める。）"
-    else:
-      sanitized_action = sanitize_for_api(action_input)
-
     output_story = None
     error_detail = None
     jpy_cost = 0.0
