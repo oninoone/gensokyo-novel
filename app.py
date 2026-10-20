@@ -108,7 +108,7 @@ def calc_usage_cost(usage_meta):
       (un_in_tok * 2.0 / 1_000_000)
       + (cache_tok * 0.10 / 1_000_000)
       + ((out_tok + th_tok) * 10.0 / 1_000_000)
-  )
+  )* 2.0
   return usd * USD_JPY, un_in_tok, cache_tok, th_tok, out_tok
 
 
@@ -513,10 +513,7 @@ ASSISTANT:
       st.session_state.last_cost_info = (
           f"💰 直前ラリー: **約 {total_turn_cost:.2f} 円**{sum_note}\n"
           f"- 入力: {un_in_tok:,} tok (キャッシュ: {cache_tok:,} tok)\n"
-          f"- 思考(逆算含): {th_tok:,} tok / 本文: {out_tok:,} tok"
       )
-      # ★APIが返してきた生のトークン明細を丸ごと保存
-      st.session_state.raw_usage = str(getattr(response, "usage_metadata", "データなし"))
 
       commit_save_data(st.session_state.summaries, st.session_state.messages)
       st.rerun()
