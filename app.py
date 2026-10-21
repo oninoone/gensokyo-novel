@@ -347,7 +347,7 @@ def summarize_old_context(raw_messages):
 """
     try:
       resp = gemini_client.models.generate_content(
-          model="models/gemini-4-argon",
+          model="models/gemini-3.8-flash",
           contents=prompt,
           config=types.GenerateContentConfig(
               safety_settings=CUSTOM_SAFETY_SETTINGS
@@ -644,7 +644,7 @@ USER: {sanitized_action}
 """
         try:
           response = gemini_client.models.generate_content(
-              model="models/gemini-4-argon",
+              model="models/gemini-3.8-flash",
               contents=full_contents,
               config=types.GenerateContentConfig(
                   system_instruction=SYSTEM_INSTRUCTION,
