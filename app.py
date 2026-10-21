@@ -194,8 +194,8 @@ def sanitize_for_api(text):
       "ガクガクと": "甘く",
   }
   sanitized = text
-  for k, v in replacements.items():
-    sanitized = sanitized.replace(k, v)
+  for k in sorted(replacements.keys(), key=len, reverse=True):
+    sanitized = sanitized.replace(k, replacements[k])
   return sanitized
 
 
@@ -532,11 +532,7 @@ else:
         m for m in st.session_state.messages if m.get("act") == current_act
     ][:-1]
     all_recent_candidates = prev_act_messages + curr_act_without_last
-    # ★空白（スペースのみ）で送信された場合、AIが過激方向に暴走しないよう自然な繋ぎ文を補完
-    if not action_input.strip():
-      sanitized_action = "（状況を進める。）"
-    else:
-      sanitized_action = sanitize_for_api(action_input)
+    sanitized_action = sanitize_for_api(action_input)
 
     output_story = None
     error_detail = None
