@@ -75,8 +75,10 @@ CUSTOM_SAFETY_SETTINGS = [
 ]
 
 
-# ★API送信時専用の超強化サニタイザー
+# ★API送信時専用の超強化サニタイザー（一括置換で二重変換も防止）
 def sanitize_for_api(text):
+  if not text:
+    return ""
   replacements = {
       # 性フレーズのマイルド化
       "最後の一滴まで吸い尽くす": "優しく口づける",
@@ -240,10 +242,9 @@ def sanitize_for_api(text):
       "痙攣": "震え",
       "ガクガクと": "甘く",
   }
-  sanitized = text
-  for k in sorted(replacements.keys(), key=len, reverse=True):
-    sanitized = sanitized.replace(k, replacements[k])
-  return sanitized
+  sorted_keys = sorted(replacements.keys(), key=len, reverse=True)
+  pattern = re.compile("|".join(map(re.escape, sorted_keys)))
+  return pattern.sub(lambda m: replacements[m.group(0)], text)
 
 
 # ★AIのソフト拒否（お説教回答）を判定する関数
@@ -449,6 +450,17 @@ with st.sidebar:
       help="1〜2往復に絞ると突破＆節約可。",
   )
 
+  # ★新設：全文を送る過去要約の幕数スライダー（0幕〜全幕まで調整可能）
+  max_sum_acts = max(1, len(st.session_state.summaries))
+  default_sum_acts = min(10, max_sum_acts)
+  full_summary_acts = st.slider(
+      "📚 全文を送る過去要約（直近〇幕）",
+      min_value=0,
+      max_value=max_sum_acts,
+      value=default_sum_acts,
+      help="指定した幕数分は要約の全文をAIへ送り、それより古い幕は見出し＋末尾抜粋に圧縮します。右端にすると全幕の要約全文を送ります。",
+  )
+
   # 直前のやり取り（1手）を巻き戻す救急ボタン
   if st.button("⏪ 直前の1手を巻き戻す"):
     chat_msgs = [m for m in st.session_state.messages if m.get("act", 1) > 0]
@@ -588,9 +600,9 @@ else:
     used_fallback = False
 
     with st.spinner("幻想郷の時間を進めています..."):
-      # ★3段階の自動リトライ（通常 → 直近2往復＋要約抜粋 → 直近1往復＋直近3幕の見出しのみ）で門前払いを確実に突破
+      # ★1回目はスライダーで指定した幕数（full_summary_acts）の要約全文を送信！
       for attempt_idx, (msg_limit, full_sum_count) in enumerate(
-          [(context_rounds * 2, 3), (4, 0), (2, -1)]
+          [(context_rounds * 2, full_summary_acts), (4, 0), (2, -1)]
       ):
         total_summaries = len(st.session_state.summaries)
         compressed_summaries = []
