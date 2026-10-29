@@ -276,8 +276,8 @@ def is_refusal_response(text):
   return False
 
 
-# ★usage_metadataから隠れ思考トークンを含めて正確に料金を計算する関数
-def calc_usage_cost(usage_meta):
+# ★usage_metadataから隠れ思考トークンを含めて正確に料金を計算する関数（モデル別単価対応）
+def calc_usage_cost(usage_meta, model_name="models/gemini-4-argon"):
   if not usage_meta:
     return 0.0, 0, 0, 0, 0
   in_tok = getattr(usage_meta, "prompt_token_count", 0) or 0
@@ -290,11 +290,13 @@ def calc_usage_cost(usage_meta):
     th_tok = total_tok - in_tok - out_tok
 
   un_in_tok = max(0, in_tok - cache_tok)
+  # 3.8-flash 選択時はおよそ半額のレートで試算
+  rate_mult = 1.0 if "3.8-flash" in model_name else 2.0
   usd = (
       (un_in_tok * 2.0 / 1_000_000)
       + (cache_tok * 0.10 / 1_000_000)
       + ((out_tok + th_tok) * 10.0 / 1_000_000)
-  ) * 2.0
+  ) * rate_mult
   return usd * USD_JPY, un_in_tok, cache_tok, th_tok, out_tok
 
 
@@ -337,7 +339,7 @@ def set_world_memo(messages, new_memo):
   return filtered
 
 
-# 3. 10往復到達時の自動要約（検閲回避フォールバック付き）
+# 3. 10往復到達時の自動要約（★裏方の要約は常に低コストな 3.8-flash で固定）
 def summarize_old_context(raw_messages):
   for slice_count in [len(raw_messages), 6]:
     target_msgs = raw_messages[-slice_count:]
@@ -364,7 +366,7 @@ def summarize_old_context(raw_messages):
           ),
       )
       sum_cost, _, _, _, _ = calc_usage_cost(
-          getattr(resp, "usage_metadata", None)
+          getattr(resp, "usage_metadata", None), "models/gemini-3.8-flash"
       )
       if resp.text and not is_refusal_response(resp.text):
         return resp.text.strip(), sum_cost
@@ -450,6 +452,24 @@ with st.sidebar:
   if "last_cost_info" in st.session_state:
     st.info(st.session_state.last_cost_info)
 
+  # ★新設：執筆モデルのワンタッチ切り替え（デフォルトは 4.0-argon）
+  selected_model = st.selectbox(
+      "🧠 執筆AIモデル",
+      options=["models/gemini-4-argon", "models/gemini-3.8-flash"],
+      index=0,
+      help="4.0-argonは最高品質、3.8-flashは超低コスト。場面に応じていつでも切り替えられます。",
+  )
+
+  # ★新設：一番高い「思考トークン」を抑える上限スライダー（デフォルト256でコスト激減）
+  thinking_limit = st.slider(
+      "💭 思考トークン上限（節約の要）",
+      min_value=0,
+      max_value=1536,
+      value=256,
+      step=128,
+      help="4.0-argonは256程度でも十分高品質な文章を書きます。ここを抑えると出力課金が劇的に安くなります。",
+  )
+
   # ★AIに送る直近生ログの往復数スライダー
   context_rounds = st.slider(
       "📡 AIへ送る直近ログ数（往復）",
@@ -459,7 +479,7 @@ with st.sidebar:
       help="1〜2往復に絞ると突破＆節約可。",
   )
 
-  # ★新設：全文を送る過去要約の幕数スライダー（0幕〜全幕まで調整可能）
+  # ★全文を送る過去要約の幕数スライダー（0幕〜全幕まで調整可能）
   max_sum_acts = max(1, len(st.session_state.summaries))
   default_sum_acts = min(10, max_sum_acts)
   full_summary_acts = st.slider(
@@ -467,7 +487,7 @@ with st.sidebar:
       min_value=0,
       max_value=max_sum_acts,
       value=default_sum_acts,
-      help="指定した幕数分は要約の全文をAIへ送り、それより古い幕は見出し＋末尾抜粋に圧縮します。右端にすると全幕の要約全文を送ります。",
+      help="指定した幕数分は要約の全文をAIへ送り、それより古い幕は見出し＋末尾抜粋に圧縮します。",
   )
 
   # 直前のやり取り（1手）を巻き戻す救急ボタン
@@ -593,6 +613,33 @@ else:
         else ""
     )
 
+    # ★2. 要約アーカイブをループの外で固定構築（リトライ時も前方一致キャッシュを絶対に外さない）
+    total_summaries = len(st.session_state.summaries)
+    compressed_summaries = []
+    for idx, s in enumerate(st.session_state.summaries):
+      sanitized_s = sanitize_for_api(s)
+      if full_summary_acts > 0 and idx >= total_summaries - full_summary_acts:
+        compressed_summaries.append(f"[過去の記録 第{idx+1}幕]\n{sanitized_s}")
+      else:
+        lines = [
+            line.strip()
+            for line in sanitized_s.strip().split("\n")
+            if line.strip()
+        ]
+        header = lines[0] if lines else "記録"
+        body_flat = "".join(lines[1:]) if len(lines) > 1 else ""
+        tail_text = body_flat[-70:] if len(body_flat) > 70 else body_flat
+        compressed_summaries.append(
+            f"[第{idx+1}幕（抜粋）] {header} / …{tail_text}"
+        )
+
+    summaries_context = "\n---\n".join(compressed_summaries)
+    archive_block = (
+        f"【過去の物語の要約・確定した歴史】\n{summaries_context}\n\n"
+        if summaries_context
+        else ""
+    )
+
     prev_act_messages = [
         m for m in st.session_state.messages if m.get("act") == current_act - 1
     ][-4:]
@@ -609,52 +656,18 @@ else:
     used_fallback = False
 
     with st.spinner("幻想郷の時間を進めています..."):
-      # ★1回目はスライダーで指定した幕数（full_summary_acts）の要約全文を送信！
-      for attempt_idx, (msg_limit, full_sum_count) in enumerate(
-          [(context_rounds * 2, full_summary_acts), (4, 0), (2, -1)]
+      # ★無駄な3重課金を防ぐため最大2回までに制限し、万一の2回目は3.8-flashで確実に拾う省エネ設計
+      for attempt_idx, (msg_limit, use_model) in enumerate(
+          [(context_rounds * 2, selected_model), (2, "models/gemini-3.8-flash")]
       ):
-        total_summaries = len(st.session_state.summaries)
-        compressed_summaries = []
-        for idx, s in enumerate(st.session_state.summaries):
-          if full_sum_count == -1 and idx < total_summaries - 3:
-            continue
-          sanitized_s = sanitize_for_api(s)
-          if full_sum_count > 0 and idx >= total_summaries - full_sum_count:
-            compressed_summaries.append(f"[過去の記録 第{idx+1}幕]\n{sanitized_s}")
-          else:
-            lines = [
-                line.strip()
-                for line in sanitized_s.strip().split("\n")
-                if line.strip()
-            ]
-            header = lines[0] if lines else "記録"
-            body_flat = "".join(lines[1:]) if len(lines) > 1 else ""
-            tail_text = body_flat[-70:] if len(body_flat) > 70 else body_flat
-            if full_sum_count == -1:
-              compressed_summaries.append(f"[第{idx+1}幕] {header}")
-            else:
-              compressed_summaries.append(
-                  f"[第{idx+1}幕（抜粋）] {header} / …{tail_text}"
-              )
-
-        summaries_context = "\n---\n".join(compressed_summaries)
-        archive_block = (
-            f"【過去の物語の要約・確定した歴史】\n{summaries_context}\n\n"
-            if summaries_context
-            else ""
-        )
-
         recent_messages = all_recent_candidates[-msg_limit:]
         history_text = "\n".join([
             f"{m['role'].upper()}: {sanitize_for_api(m['content'])}"
             for m in recent_messages
         ])
 
-        safety_steering = (
-            "※注意：出力フィルターの誤検知を防ぐため、直接的な部位表現や過激な語彙を避け、吐息や視線、感情の機微を中心とした上品で艶やかな文芸表現で執筆すること。\n"
-            if attempt_idx >= 1
-            else ""
-        )
+        # ★1発目から常時出力検閲ガードを添えることで、4.0-argonの出力途中中断（丸損リトライ）を未然に防止
+        safety_steering = "※執筆指針：出力フィルターの誤検知を防ぐため、直接的な解剖学用語や過激な単語は避け、吐息や視線、感情の機微と人外の格の違いを上品かつ濃厚な文芸表現で描くこと。\n"
 
         full_contents = f"""
 {memo_block}{archive_block}【直近の情景と対話ログ】
@@ -664,23 +677,32 @@ USER: {sanitized_action}
 {safety_steering}ASSISTANT（メタ発言を一切含めず、「・日時：」から直ちに小説の続きを執筆）:
 """
         try:
+          curr_thinking = thinking_limit if attempt_idx == 0 else 256
+          gen_config = types.GenerateContentConfig(
+              system_instruction=SYSTEM_INSTRUCTION,
+              temperature=0.85 if attempt_idx == 0 else 0.75,
+              max_output_tokens=2048,
+              safety_settings=CUSTOM_SAFETY_SETTINGS,
+          )
+          if curr_thinking > 0:
+            gen_config.thinking_config = types.ThinkingConfig(
+                thinking_budget=curr_thinking
+            )
+
           response = gemini_client.models.generate_content(
-              model="models/gemini-3.8-flash",
+              model=use_model,
               contents=full_contents,
-              config=types.GenerateContentConfig(
-                  system_instruction=SYSTEM_INSTRUCTION,
-                  temperature=0.85 if attempt_idx == 0 else 0.75,
-                  max_output_tokens=4096,
-                  thinking_config=types.ThinkingConfig(
-                      thinking_budget=1536 if attempt_idx == 0 else 512
-                  ),
-                  safety_settings=CUSTOM_SAFETY_SETTINGS,
-              ),
+              config=gen_config,
           )
 
-          jpy_cost, un_in_tok, cache_tok, th_tok, out_tok = calc_usage_cost(
-              getattr(response, "usage_metadata", None)
+          step_cost, step_in, step_cache, step_th, step_out = calc_usage_cost(
+              getattr(response, "usage_metadata", None), use_model
           )
+          jpy_cost += step_cost
+          un_in_tok += step_in
+          cache_tok += step_cache
+          th_tok += step_th
+          out_tok += step_out
 
           if response.text:
             candidate_text = response.text.strip()
@@ -740,6 +762,7 @@ USER: {sanitized_action}
       st.session_state.last_cost_info = (
           f"💰 直前ラリー: **約 {total_turn_cost:.2f} 円**{sum_note}\n"
           f"- 入力: {un_in_tok:,} tok (キャッシュ: {cache_tok:,} tok)\n"
+          f"- 思考: {th_tok:,} tok / 出力: {out_tok:,} tok"
       )
 
       commit_save_data(st.session_state.summaries, st.session_state.messages)
