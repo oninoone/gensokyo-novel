@@ -457,7 +457,7 @@ with st.sidebar:
       "🧠 執筆AIモデル",
       options=["models/gemini-4-argon", "models/gemini-3.8-flash"],
       index=0,
-      help="4.0-argonは最高品質、3.8-flashは超低コスト。場面に応じていつでも切り替えられます。",
+      help="4.0-argonは最高品質、3.8-flashは超低コスト。",
   )
 
   # ★新設：一番高い「思考トークン」を抑える上限スライダー（デフォルト256でコスト激減）
@@ -467,7 +467,7 @@ with st.sidebar:
       max_value=1536,
       value=256,
       step=128,
-      help="4.0-argonは256程度でも十分高品質な文章を書きます。ここを抑えると出力課金が劇的に安くなります。",
+      help="4.0-argonは256程度でも十分高品質な文章を書きます。",
   )
 
   # ★AIに送る直近生ログの往復数スライダー
@@ -487,7 +487,7 @@ with st.sidebar:
       min_value=0,
       max_value=max_sum_acts,
       value=default_sum_acts,
-      help="指定した幕数分は要約の全文をAIへ送り、それより古い幕は見出し＋末尾抜粋に圧縮します。",
+      help="これより古い幕は見出し＋末尾抜粋に圧縮します。",
   )
 
   # 直前のやり取り（1手）を巻き戻す救急ボタン
