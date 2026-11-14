@@ -739,13 +739,13 @@ with st.sidebar:
       "📡 AIへ送る直近ログ数（往復）",
       min_value=1,
       max_value=12,
-      value=5,
+      value=3,
       help="1〜2往復に絞ると突破＆節約可。",
   )
 
   # ★全文を送る過去要約の幕数スライダー
   max_sum_acts = max(1, len(st.session_state.summaries))
-  default_sum_acts = min(10, max_sum_acts)
+  default_sum_acts = min(1, max_sum_acts)
   full_summary_acts = st.slider(
       "📚 全文を送る過去要約（直近〇幕）",
       min_value=0,
