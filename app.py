@@ -474,7 +474,7 @@ with st.sidebar:
   thinking_limit = st.select_slider(
       "💭 思考トークン上限（節約の要）",
       options=[0, 256, 1024, 2048, 3072, 4096],
-      value=1024,
+      value=2048,
       format_func=lambda x: {
           0: "オフ (0)",
           256: "最小 (256)",
