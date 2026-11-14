@@ -996,10 +996,10 @@ elif st.session_state.selected_act is not None:
   st.markdown("---")
   if st.session_state.just_finished_act:
     st.success(
-        f"🎉 第 {target_act} 幕（全{WINDOW_ROUNDS}往復）が完結し、記憶アーカイブへ要約を記録しました！"
+        f"第 {target_act} 幕の要約を記録しました"
     )
   if st.button(
-      f"✨ 第 {current_act} 幕（新しい幕）へ進む",
+      f"第 {current_act} 幕（新しい幕）へ進む",
       key="proceed_next_act_bottom",
       type="primary",
       use_container_width=True,
