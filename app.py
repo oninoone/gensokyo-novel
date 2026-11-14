@@ -462,25 +462,28 @@ with st.sidebar:
   if "last_cost_info" in st.session_state:
     st.info(st.session_state.last_cost_info)
 
-  # ★新設：執筆モデルのワンタッチ切り替え（デフォルトは 4.0-argon）
+  # ★執筆モデルのワンタッチ切り替え（初期値4-hydrogen）
   selected_model = st.selectbox(
       "🧠 執筆AIモデル",
       options=["models/gemini-4-argon", "models/gemini-4-hydrogen"],
-      index=0,
-      help="4-argonは最高品質、4-hydrogenはバランス。",
+      index=1,
+      help="4-hydrogenはコスパ最強、4argonは最高品質。",
   )
 
-  # ★新設：一番高い「思考トークン」を抑える上限スライダー（デフォルト256でコスト激減）
+  # ★思考トークン上限（初期値を安定の 1024 に設定）
   thinking_limit = st.select_slider(
-     "💭 思考レベル（節約の要）",
-      options=[0, 256, 1024, 4096],
+      "💭 思考トークン上限（節約の要）",
+      options=[0, 256, 1024, 2048, 3072, 4096],
       value=1024,
       format_func=lambda x: {
           0: "オフ (0)",
-          256: "節約 (256)",
+          256: "最小 (256)",
           1024: "標準 (1024)",
-          4096: "高度 (4096)",
+          2048: "深考 (2048)",
+          3072: "特盛 (3072)",
+          4096: "予備 (4096)",
       }[x],
+      help="Hydrogenは1024以上で整合性が安定します。",
   )
 
   # ★AIに送る直近生ログの往復数スライダー
