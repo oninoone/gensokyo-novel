@@ -536,6 +536,56 @@ st.markdown(
     .user-entry, .user-entry p {
         color: #8c95a0 !important;
     }
+
+    /* ★キャラカード内：スマホ幅でも1行ヘッダー（名前＋読込チェック＋開閉）を絶対に横並び維持 */
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] {
+        flex-wrap: nowrap !important;
+        align-items: center !important;
+        gap: 0.35rem !important;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+        min-width: 0 !important;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(1) {
+        flex: 1 1 auto !important;
+        width: auto !important;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(2),
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(3) {
+        flex: 0 0 auto !important;
+        width: auto !important;
+    }
+
+    /* キャラ名入力欄を「1行の見出し（タップで直接編集可）」風にスリム化 */
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] input {
+        font-weight: 700 !important;
+        font-size: 1.02rem !important;
+        padding: 0.3rem 0.5rem !important;
+        background-color: transparent !important;
+        border: 1px solid transparent !important;
+        border-radius: 6px !important;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] input:hover,
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] input:focus {
+        background-color: rgba(128, 128, 128, 0.12) !important;
+        border: 1px solid rgba(217, 83, 111, 0.5) !important;
+    }
+
+    /* チェックボックスと開閉ボタンをコンパクトに整列 */
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stCheckbox"] {
+        margin-top: 0 !important;
+        margin-bottom: 0 !important;
+        white-space: nowrap !important;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stCheckbox"] label p {
+        font-size: 0.88rem !important;
+        margin-bottom: 0 !important;
+        line-height: 1.2 !important;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] button {
+        padding: 0.25rem 0.55rem !important;
+        min-height: 2.1rem !important;
+    }
     </style>
 """,
     unsafe_allow_html=True,
@@ -550,6 +600,12 @@ if "world_text" not in st.session_state or "characters" not in st.session_state:
   w_text, chars = get_structured_memo(st.session_state.messages)
   st.session_state.world_text = w_text
   st.session_state.characters = chars
+
+if "char_open_states" not in st.session_state:
+  st.session_state.char_open_states = {}
+
+if "last_expand_all" not in st.session_state:
+  st.session_state.last_expand_all = False
 
 current_act = len(st.session_state.summaries) + 1
 
@@ -781,6 +837,9 @@ if nav_mode == "📌 世界観・キャラ設定":
   st.subheader(
       f"👥 登場人物・関係性図鑑（読込中: {active_char_count}/{total_char_count}人）"
   )
+  st.caption(
+      "💡 名前をタップすると直接編集できます。右端の「読込」でAIへの送信ON/OFF、「▼」で詳細文を開閉します。"
+  )
 
   # 検索フィルター ＋ 一括展開トグル
   s_col1, s_col2 = st.columns([3, 1])
@@ -791,6 +850,11 @@ if nav_mode == "📌 世界観・キャラ設定":
     )
   with s_col2:
     expand_all = st.toggle("📂 全キャラを一括展開", value=False)
+
+  if expand_all != st.session_state.last_expand_all:
+    st.session_state.last_expand_all = expand_all
+    for c in st.session_state.characters:
+      st.session_state.char_open_states[c["id"]] = expand_all
 
   with st.expander("➕ 新しいキャラクターを追加する", expanded=False):
     with st.form("add_character_form", clear_on_submit=True):
@@ -805,17 +869,19 @@ if nav_mode == "📌 世界観・キャラ設定":
       )
       if st.form_submit_button("リストに追加", use_container_width=True):
         if new_c_name.strip():
+          new_id = uuid.uuid4().hex[:8]
           st.session_state.characters.append({
-              "id": uuid.uuid4().hex[:8],
+              "id": new_id,
               "name": new_c_name.strip(),
               "desc": new_c_desc.strip(),
               "active": True,
           })
+          st.session_state.char_open_states[new_id] = True
           sync_and_save_settings()
           st.toast(f"✨ {new_c_name.strip()} を図鑑に追加＆保存しました！")
           st.rerun()
 
-  # 登録済みキャラクター一覧（スマホでも邪魔なボタンゼロ・開いたら即閲覧＆編集）
+  # 登録済みキャラクター一覧（1行ヘッダー：名前直接編集 ＋ 右端にAI読込 ＋ 詳細開閉）
   chars_list = st.session_state.characters
   q_lower = search_query.strip().lower()
 
@@ -827,36 +893,48 @@ if nav_mode == "📌 世界観・キャラ設定":
       continue
 
     cid = char["id"]
-    status_icon = "🟢" if char.get("active", True) else "⚪"
+    is_open = st.session_state.char_open_states.get(cid, False)
 
-    with st.expander(
-        f"{status_icon} {char['name']}",
-        expanded=expand_all,
-    ):
-      updated_active = st.checkbox(
-          "AIに読み込む",
-          value=char.get("active", True),
-          key=f"cact_{cid}",
-      )
-      updated_name = st.text_input(
-          "キャラクター名",
-          value=char["name"],
-          key=f"cname_{cid}",
-          label_visibility="collapsed",
-      )
-      # スマホの画面幅でも文字が読みやすい高さに自動調整
-      auto_height = max(130, min(380, (len(char["desc"]) // 28 + 2) * 26))
-      updated_desc = st.text_area(
-          "関係性・性格・陣営・設定",
-          value=char["desc"],
-          height=auto_height,
-          key=f"cdesc_{cid}",
-          label_visibility="collapsed",
-      )
+    with st.container(border=True):
+      h_col1, h_col2, h_col3 = st.columns([7, 1.8, 1.2])
+      with h_col1:
+        updated_name = st.text_input(
+            "キャラ名",
+            value=char["name"],
+            key=f"cname_{cid}",
+            label_visibility="collapsed",
+        )
+      with h_col2:
+        updated_active = st.checkbox(
+            "読込",
+            value=char.get("active", True),
+            key=f"cact_{cid}",
+            help="チェックを入れるとAIにこのキャラの設定を読み込ませます",
+        )
+      with h_col3:
+        toggle_label = "▲" if is_open else "▼"
+        if st.button(
+            toggle_label,
+            key=f"ctoggle_{cid}",
+            help="詳細設定の開閉",
+        ):
+          st.session_state.char_open_states[cid] = not is_open
+          st.rerun()
 
-      chars_list[idx]["active"] = updated_active
       chars_list[idx]["name"] = updated_name
-      chars_list[idx]["desc"] = updated_desc
+      chars_list[idx]["active"] = updated_active
+
+      # 詳細が開いているときだけ設定テキスト枠を表示
+      if is_open:
+        auto_height = max(130, min(380, (len(char["desc"]) // 28 + 2) * 26))
+        updated_desc = st.text_area(
+            "関係性・性格・陣営・設定",
+            value=char["desc"],
+            height=auto_height,
+            key=f"cdesc_{cid}",
+            label_visibility="collapsed",
+        )
+        chars_list[idx]["desc"] = updated_desc
 
   st.markdown("---")
   if st.button(
