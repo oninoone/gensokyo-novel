@@ -37,7 +37,7 @@ SYSTEM_INSTRUCTION = """
 - キャラクターの日常や幻想郷の日常を極端に曲げないこと。
 
 【幻想郷の存在原理：人外の畏怖・格の違い・異質な精神性】
-- 妖怪・神霊などの人外キャラクターを「ただの物分かりの良い人間」や「主人公にすぐ感化されて骨抜きになる都合の良い女性」として描くことを固く禁じます。ただし、毎回無理やり妖怪らしさをこじつけて凄ませるのではなく、普段の会話は自然体で運びつつ、根底の価値観やふとした瞬間に以下の本質が滲み出るように描いてください。
+- 妖怪・神霊などの人外キャラクターを「ただの物分かりの良い人間」や「主人公にすぐ感化されて骨抜きになる都合の良い女性」として描くことを固く禁じます。ただし、毎回無理やり妖怪らしさをこじつけて凄ませるのではなく、普段は自然体で運びつつ、根底の価値観やふとした瞬間に以下の本質が滲み出るように描いてください。
   1. 【負の感情と畏怖の化身】:
      妖怪は「人間の恐怖・闇・負のイメージ」から生まれ、神霊は「自然の猛威・信仰・畏敬」から存在する異類です。普段は親しげに雑談していても、人間とは時間の尺度や倫理観が根本から異なる「上位の異類」としての余裕や達観を根底に持たせてください。
   2. 【緩急のある畏怖と格の違い】:
@@ -327,12 +327,10 @@ def execute_scroll(direction="top"):
     // scroll trigger: {nonce}
     const doScroll = () => {{
         const doc = window.parent.document;
-        // 1. 専用アンカー要素へスクロール
         const anchor = doc.getElementById('{anchor_id}');
         if (anchor) {{
             anchor.scrollIntoView({{ behavior: 'smooth', block: '{block_pos}' }});
         }}
-        // 2. サイドバー以外のスクロール可能な全コンテナを走査してスクロール
         doc.querySelectorAll('*').forEach(el => {{
             if (el.closest('[data-testid="stSidebar"]')) return;
             if (el.scrollHeight > el.clientHeight + 10) {{
@@ -424,6 +422,28 @@ def get_structured_memo(messages):
     pass
 
   return parse_legacy_memo(raw_content)
+
+
+def sync_and_save_settings():
+  """画面上の最新の入力内容をすべて同期してSupabaseへ保存する"""
+  if "world_text_editor" in st.session_state:
+    st.session_state.world_text = st.session_state.world_text_editor
+
+  for c in st.session_state.characters:
+    cid = c["id"]
+    if f"cname_{cid}" in st.session_state:
+      c["name"] = st.session_state[f"cname_{cid}"]
+    if f"cact_{cid}" in st.session_state:
+      c["active"] = st.session_state[f"cact_{cid}"]
+    if f"cdesc_{cid}" in st.session_state:
+      c["desc"] = st.session_state[f"cdesc_{cid}"]
+
+  st.session_state.messages = save_structured_memo(
+      st.session_state.messages,
+      st.session_state.world_text,
+      st.session_state.characters,
+  )
+  commit_save_data(st.session_state.summaries, st.session_state.messages)
 
 
 def save_structured_memo(messages, world_text, characters):
@@ -565,8 +585,13 @@ def display_novel_entry(role, content):
     st.markdown(content)
 
 
+active_char_count = sum(
+    1 for c in st.session_state.characters if c.get("active", True)
+)
+total_char_count = len(st.session_state.characters)
+
 with st.sidebar:
-  # ★画面上下クイックジャンプボタン
+  # ★1. 画面上下クイックジャンプボタン
   sc_col1, sc_col2 = st.columns(2)
   with sc_col1:
     if st.button("⬆️ 一番上へ", use_container_width=True):
@@ -575,6 +600,26 @@ with st.sidebar:
     if st.button("⬇️ 一番下へ", use_container_width=True):
       st.session_state.scroll_action = "bottom"
 
+  # ★2. サイドバーから直接「執筆」と「世界観・キャラ設定」を切り替え
+  nav_mode = st.radio(
+      "画面モード",
+      options=["📖 物語の執筆", "📌 世界観・キャラ設定"],
+      label_visibility="collapsed",
+  )
+
+  if nav_mode == "📌 世界観・キャラ設定":
+    st.caption(f"👥 AI読込中: **{active_char_count}** / {total_char_count} 人")
+    if st.button(
+        "💾 設定をすべて保存",
+        key="sidebar_save_settings",
+        type="primary",
+        use_container_width=True,
+    ):
+      sync_and_save_settings()
+      st.toast("📌 世界観とキャラクター設定を保存しました！")
+      st.rerun()
+
+  st.markdown("---")
   st.title("📜 記憶アーカイブ")
 
   if st.session_state.selected_act is not None:
@@ -704,52 +749,38 @@ with st.sidebar:
 # 5. メイン画面の描画（最上部アンカー設置）
 st.markdown('<div id="page-top-anchor"></div>', unsafe_allow_html=True)
 
-active_char_count = sum(
-    1 for c in st.session_state.characters if c.get("active", True)
-)
-total_char_count = len(st.session_state.characters)
-
-nav_mode = st.radio(
-    "表示モード切替",
-    options=[
-        "📖 物語の執筆",
-        f"📌 世界観・キャラクター設定（読込中: {active_char_count}/{total_char_count}人）",
-    ],
-    horizontal=True,
-    label_visibility="collapsed",
-)
-
-if nav_mode.startswith("📌"):
+if nav_mode == "📌 世界観・キャラ設定":
   # ==========================================
   # 世界観・キャラクター設定データベース画面
   # ==========================================
   col_h1, col_h2 = st.columns([3, 1])
   with col_h1:
-    st.title("📌 世界観・キャラクター設定")
+    st.title("📌 世界観・キャラ設定")
   with col_h2:
     if st.button(
-        "💾 設定をすべて保存", type="primary", use_container_width=True
+        "💾 設定をすべて保存",
+        key="top_save_settings",
+        type="primary",
+        use_container_width=True,
     ):
-      st.session_state.messages = save_structured_memo(
-          st.session_state.messages,
-          st.session_state.world_text,
-          st.session_state.characters,
-      )
-      commit_save_data(st.session_state.summaries, st.session_state.messages)
+      sync_and_save_settings()
       st.toast("📌 世界観とキャラクター設定を保存しました！")
       st.rerun()
 
   st.subheader("🌐 世界観・大目標・契約・情勢メモ")
-  st.session_state.world_text = st.text_area(
+  st.text_area(
       "世界観メモ",
       value=st.session_state.world_text,
       height=220,
+      key="world_text_editor",
       label_visibility="collapsed",
       placeholder="大目標、種族ごとの感情の法則、勢力間の契約、現在の裏での動きなどを自由に記入してください。",
   )
 
   st.markdown("---")
-  st.subheader("👥 登場人物・関係性図鑑")
+  st.subheader(
+      f"👥 登場人物・関係性図鑑（読込中: {active_char_count}/{total_char_count}人）"
+  )
 
   # 検索フィルター ＋ 一括展開トグル
   s_col1, s_col2 = st.columns([3, 1])
@@ -759,8 +790,6 @@ if nav_mode.startswith("📌"):
         placeholder="例：レミリア、紅魔館、守矢、将棋…",
     )
   with s_col2:
-    st.write("")
-    st.write("")
     expand_all = st.toggle("📂 全キャラを一括展開", value=False)
 
   with st.expander("➕ 新しいキャラクターを追加する", expanded=False):
@@ -782,18 +811,11 @@ if nav_mode.startswith("📌"):
               "desc": new_c_desc.strip(),
               "active": True,
           })
-          st.session_state.messages = save_structured_memo(
-              st.session_state.messages,
-              st.session_state.world_text,
-              st.session_state.characters,
-          )
-          commit_save_data(
-              st.session_state.summaries, st.session_state.messages
-          )
+          sync_and_save_settings()
           st.toast(f"✨ {new_c_name.strip()} を図鑑に追加＆保存しました！")
           st.rerun()
 
-  # 登録済みキャラクター一覧（短い見出し ＋ 1クリックで即編集可能）
+  # 登録済みキャラクター一覧（スマホでも邪魔なボタンゼロ・開いたら即閲覧＆編集）
   chars_list = st.session_state.characters
   q_lower = search_query.strip().lower()
 
@@ -807,60 +829,23 @@ if nav_mode.startswith("📌"):
     cid = char["id"]
     status_icon = "🟢" if char.get("active", True) else "⚪"
 
-    # 見出しはアイコン＋キャラ名だけの短い表示に統一
     with st.expander(
         f"{status_icon} {char['name']}",
         expanded=expand_all,
     ):
-      c_col1, c_col2, c_col3, c_col4, c_col5 = st.columns([4.5, 2, 0.8, 0.8, 0.9])
-      with c_col1:
-        updated_name = st.text_input(
-            "キャラクター名",
-            value=char["name"],
-            key=f"cname_{cid}",
-            label_visibility="collapsed",
-        )
-      with c_col2:
-        updated_active = st.checkbox(
-            "AIに読み込む",
-            value=char.get("active", True),
-            key=f"cact_{cid}",
-        )
-      with c_col3:
-        if st.button("↑", key=f"cup_{cid}", disabled=(idx == 0), help="上へ移動"):
-          chars_list[idx - 1], chars_list[idx] = (
-              chars_list[idx],
-              chars_list[idx - 1],
-          )
-          st.rerun()
-      with c_col4:
-        if st.button(
-            "↓",
-            key=f"cdown_{cid}",
-            disabled=(idx == len(chars_list) - 1),
-            help="下へ移動",
-        ):
-          chars_list[idx + 1], chars_list[idx] = (
-              chars_list[idx],
-              chars_list[idx + 1],
-          )
-          st.rerun()
-      with c_col5:
-        if st.button("🗑️", key=f"cdel_{cid}", help="このキャラを削除"):
-          st.session_state.characters.pop(idx)
-          st.session_state.messages = save_structured_memo(
-              st.session_state.messages,
-              st.session_state.world_text,
-              st.session_state.characters,
-          )
-          commit_save_data(
-              st.session_state.summaries, st.session_state.messages
-          )
-          st.toast(f"🗑️ {char['name']} を削除しました")
-          st.rerun()
-
-      # 文章の長さに合わせて高さを自動調整した編集枠を直接表示
-      auto_height = max(100, min(320, (len(char["desc"]) // 42 + 2) * 26))
+      updated_active = st.checkbox(
+          "AIに読み込む",
+          value=char.get("active", True),
+          key=f"cact_{cid}",
+      )
+      updated_name = st.text_input(
+          "キャラクター名",
+          value=char["name"],
+          key=f"cname_{cid}",
+          label_visibility="collapsed",
+      )
+      # スマホの画面幅でも文字が読みやすい高さに自動調整
+      auto_height = max(130, min(380, (len(char["desc"]) // 28 + 2) * 26))
       updated_desc = st.text_area(
           "関係性・性格・陣営・設定",
           value=char["desc"],
@@ -869,24 +854,20 @@ if nav_mode.startswith("📌"):
           label_visibility="collapsed",
       )
 
-      chars_list[idx]["name"] = updated_name
       chars_list[idx]["active"] = updated_active
+      chars_list[idx]["name"] = updated_name
       chars_list[idx]["desc"] = updated_desc
 
-      if st.button(
-          f"💾 {updated_name} の変更を保存",
-          key=f"csave_{cid}",
-      ):
-        st.session_state.messages = save_structured_memo(
-            st.session_state.messages,
-            st.session_state.world_text,
-            st.session_state.characters,
-        )
-        commit_save_data(
-            st.session_state.summaries, st.session_state.messages
-        )
-        st.toast(f"💾 {updated_name} の設定を保存しました！")
-        st.rerun()
+  st.markdown("---")
+  if st.button(
+      "💾 変更した設定をすべて保存",
+      key="bottom_save_settings",
+      type="primary",
+      use_container_width=True,
+  ):
+    sync_and_save_settings()
+    st.toast("📌 世界観とキャラクター設定を保存しました！")
+    st.rerun()
 
 elif st.session_state.selected_act is not None:
   # ==========================================
@@ -1109,7 +1090,6 @@ USER: {sanitized_action}
         with st.spinner("一幕の記憶を要約アーカイブへ記録中..."):
           new_summary, sum_cost = summarize_old_context(updated_act_messages)
           st.session_state.summaries.append(new_summary)
-          # ★完結した幕の最終出力をそのまま読めるよう、該当幕を表示したまま最下部へスクロール
           st.session_state.selected_act = len(st.session_state.summaries) - 1
           st.session_state.just_finished_act = True
           st.session_state.scroll_action = "bottom"
