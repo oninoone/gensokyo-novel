@@ -1,4 +1,6 @@
+import json
 import re
+import uuid
 from google import genai
 from google.genai import types
 import streamlit as st
@@ -309,7 +311,8 @@ def calc_usage_cost(usage_meta, model_name="models/gemini-4-argon"):
   )
   return usd * USD_JPY, un_in_tok, cache_tok, th_tok, out_tok
 
-# 2. DB操作
+
+# 2. DB操作 & 設定データの構造化管理
 def fetch_save_data():
   try:
     res = (
@@ -332,20 +335,96 @@ def commit_save_data(summaries, messages):
   ).eq("id", SAVE_ID).execute()
 
 
-def get_world_memo(messages):
+def parse_legacy_memo(raw_text):
+  """既存のテキスト形式メモを『世界観メモ』と『キャラ別データ』に安全に自動分割する"""
+  if not raw_text:
+    return "", []
+  world_lines = []
+  characters = []
+  # 行頭の「・」から最初の全角「：」までをキャラ名として取得（名前の途中の「・」はそのまま保持）
+  char_pattern = re.compile(r"^・\s*([^：]+)：\s*(.+)$")
+
+  for line in raw_text.splitlines():
+    stripped = line.strip()
+    m = char_pattern.match(stripped)
+    if m:
+      characters.append({
+          "id": uuid.uuid4().hex[:8],
+          "name": m.group(1).strip(),
+          "desc": m.group(2).strip(),
+          "active": True,
+      })
+    else:
+      world_lines.append(line)
+
+  world_text = "\n".join(world_lines).strip()
+  return world_text, characters
+
+
+def get_structured_memo(messages):
+  """messagesから構造化済み設定（世界観テキスト, キャラリスト）を取り出す"""
+  raw_content = ""
   for m in messages:
     if m.get("act") == -1 and m.get("role") == "memo":
-      return m.get("content", "")
-  return ""
+      raw_content = m.get("content", "")
+      break
+
+  if not raw_content:
+    return "", []
+
+  try:
+    data = json.loads(raw_content)
+    if isinstance(data, dict) and ("world" in data or "characters" in data):
+      chars = data.get("characters", [])
+      for c in chars:
+        if "id" not in c:
+          c["id"] = uuid.uuid4().hex[:8]
+        if "active" not in c:
+          c["active"] = True
+      return data.get("world", ""), chars
+  except Exception:
+    pass
+
+  # まだ旧テキスト形式の場合は自動解析して返す
+  return parse_legacy_memo(raw_content)
 
 
-def set_world_memo(messages, new_memo):
+def save_structured_memo(messages, world_text, characters):
+  """世界観テキストとキャラリストをJSON化してmessagesに格納する"""
   filtered = [
       m for m in messages if not (m.get("act") == -1 and m.get("role") == "memo")
   ]
-  if new_memo.strip():
-    filtered.insert(0, {"role": "memo", "content": new_memo.strip(), "act": -1})
+  clean_chars = [
+      {
+          "id": c.get("id", uuid.uuid4().hex[:8]),
+          "name": c["name"].strip(),
+          "desc": c["desc"].strip(),
+          "active": c.get("active", True),
+      }
+      for c in characters
+      if c.get("name", "").strip()
+  ]
+  if world_text.strip() or clean_chars:
+    payload = json.dumps(
+        {"world": world_text.strip(), "characters": clean_chars},
+        ensure_ascii=False,
+    )
+    filtered.insert(0, {"role": "memo", "content": payload, "act": -1})
   return filtered
+
+
+def build_prompt_memo_text(world_text, characters):
+  """AIに送信する形式に組み立てる"""
+  parts = []
+  if world_text.strip():
+    parts.append(world_text.strip())
+  active_chars = [
+      c for c in characters if c.get("active", True) and c.get("name", "").strip()
+  ]
+  if active_chars:
+    char_lines = [f"・{c['name'].strip()}：{c['desc'].strip()}" for c in active_chars]
+    parts.append("\n".join(char_lines))
+  return "\n\n".join(parts)
 
 
 # 3. 10往復到達時の自動要約（★裏方の要約は4-hydrogen で固定）
@@ -410,6 +489,11 @@ if "summaries" not in st.session_state or "messages" not in st.session_state:
   st.session_state.summaries = db_summaries
   st.session_state.messages = db_messages
 
+if "world_text" not in st.session_state or "characters" not in st.session_state:
+  w_text, chars = get_structured_memo(st.session_state.messages)
+  st.session_state.world_text = w_text
+  st.session_state.characters = chars
+
 current_act = len(st.session_state.summaries) + 1
 
 for m in st.session_state.messages:
@@ -462,18 +546,18 @@ with st.sidebar:
   if "last_cost_info" in st.session_state:
     st.info(st.session_state.last_cost_info)
 
-  # ★執筆モデルのワンタッチ切り替え（初期値4-hydrogen）
+  # ★執筆モデルのワンタッチ切り替え（初期値を 4-hydrogen に設定）
   selected_model = st.selectbox(
       "🧠 執筆AIモデル",
       options=["models/gemini-4-argon", "models/gemini-4-hydrogen"],
       index=1,
-      help="4-hydrogenはコスパ最強、4argonは最高品質。",
+      help="4-hydrogenは普段使い・コスパ最強、4.0-argonは最高品質。",
   )
 
-  # ★思考トークン上限（初期値を安定の 1024 に設定）
+  # ★思考トークン上限（初期値を安定の 2048 に設定）
   thinking_limit = st.select_slider(
       "💭 思考トークン上限（節約の要）",
-      options=[0, 256, 1024, 2048, 3072, 4096],
+      options=[0, 256, 1024, 2048, 3072],
       value=2048,
       format_func=lambda x: {
           0: "オフ (0)",
@@ -481,9 +565,8 @@ with st.sidebar:
           1024: "標準 (1024)",
           2048: "深考 (2048)",
           3072: "特盛 (3072)",
-          4096: "予備 (4096)",
       }[x],
-      help="Hydrogenは1024以上で整合性が安定します。",
+      help="Hydrogenは1024〜2048で整合性が安定します。",
   )
 
   # ★AIに送る直近生ログの往復数スライダー
@@ -495,7 +578,7 @@ with st.sidebar:
       help="1〜2往復に絞ると突破＆節約可。",
   )
 
-  # ★全文を送る過去要約の幕数スライダー（0幕〜全幕まで調整可能）
+  # ★全文を送る過去要約の幕数スライダー
   max_sum_acts = max(1, len(st.session_state.summaries))
   default_sum_acts = min(10, max_sum_acts)
   full_summary_acts = st.slider(
@@ -522,26 +605,6 @@ with st.sidebar:
     st.session_state.messages = []
     st.session_state.selected_act = None
     st.rerun()
-
-  st.markdown("---")
-  # ★絶対に忘れてほしくない基本設定・関係性メモ枠
-  with st.expander("📌 基本設定・関係性メモ（常時読込）", expanded=False):
-    st.caption("拠点、各キャラとの現在の関係性や約束など、常にAIに意識させたい不変設定を記録します。")
-    current_memo = get_world_memo(st.session_state.messages)
-    memo_input = st.text_area(
-        "基本設定メモ",
-        value=current_memo,
-        height=200,
-        key="world_memo_input",
-        placeholder="例：\n・現在の拠点：魔法の森のアリス邸\n・アリス：真斉と深い情愛関係にあり、同居中。\n・レミリア：紅魔館の主。真斉に興味を持ち夜会に招いている。",
-    )
-    if st.button("基本設定メモを保存", use_container_width=True):
-      st.session_state.messages = set_world_memo(
-          st.session_state.messages, memo_input
-      )
-      commit_save_data(st.session_state.summaries, st.session_state.messages)
-      st.toast("📌 基本設定・関係性メモを保存しました！")
-      st.rerun()
 
   st.markdown("---")
   st.markdown("### 紡がれた歴史")
@@ -581,8 +644,161 @@ with st.sidebar:
         )
         st.rerun()
 
-# 5. メイン画面の描画
-if st.session_state.selected_act is not None:
+# 5. メイン画面の描画（モード切替付き）
+active_char_count = sum(
+    1 for c in st.session_state.characters if c.get("active", True)
+)
+total_char_count = len(st.session_state.characters)
+
+nav_mode = st.radio(
+    "表示モード切替",
+    options=[
+        "📖 物語の執筆",
+        f"📌 世界観・キャラクター設定（読込中: {active_char_count}/{total_char_count}人）",
+    ],
+    horizontal=True,
+    label_visibility="collapsed",
+)
+
+if nav_mode.startswith("📌"):
+  # ==========================================
+  # 世界観・キャラクター設定データベース画面
+  # ==========================================
+  col_h1, col_h2 = st.columns([3, 1])
+  with col_h1:
+    st.title("📌 世界観・キャラクター設定")
+  with col_h2:
+    if st.button(
+        "💾 設定をすべて保存", type="primary", use_container_width=True
+    ):
+      st.session_state.messages = save_structured_memo(
+          st.session_state.messages,
+          st.session_state.world_text,
+          st.session_state.characters,
+      )
+      commit_save_data(st.session_state.summaries, st.session_state.messages)
+      st.toast("📌 世界観とキャラクター設定を保存しました！")
+      st.rerun()
+
+  st.subheader("🌐 世界観・大目標・契約・情勢メモ")
+  st.session_state.world_text = st.text_area(
+      "世界観メモ",
+      value=st.session_state.world_text,
+      height=240,
+      label_visibility="collapsed",
+      placeholder="大目標、種族ごとの感情の法則、勢力間の契約、現在の裏での動きなどを自由に記入してください。",
+  )
+
+  st.markdown("---")
+  st.subheader("👥 登場人物・関係性図鑑")
+  st.caption(
+      "💡 チェックを入れたキャラクターのみAIに常時読み込まれます。編集・並べ替え後は右上の「設定をすべて保存」を押してください。"
+  )
+
+  # 新規キャラクター追加フォーム
+  with st.expander("➕ 新しいキャラクターを追加する", expanded=False):
+    with st.form("add_character_form", clear_on_submit=True):
+      new_c_name = st.text_input(
+          "キャラクター名（フルネーム可・中黒「・」もそのまま使えます）",
+          placeholder="例：飯綱丸龍",
+      )
+      new_c_desc = st.text_area(
+          "関係性・口調・設定",
+          height=100,
+          placeholder="例：大天狗。菅牧典を通じて守矢神社に話を通し、近々正式に真斉と面会しようと画策している。",
+      )
+      if st.form_submit_button("リストに追加", use_container_width=True):
+        if new_c_name.strip():
+          st.session_state.characters.append({
+              "id": uuid.uuid4().hex[:8],
+              "name": new_c_name.strip(),
+              "desc": new_c_desc.strip(),
+              "active": True,
+          })
+          st.session_state.messages = save_structured_memo(
+              st.session_state.messages,
+              st.session_state.world_text,
+              st.session_state.characters,
+          )
+          commit_save_data(
+              st.session_state.summaries, st.session_state.messages
+          )
+          st.toast(f"✨ {new_c_name.strip()} を図鑑に追加＆保存しました！")
+          st.rerun()
+
+  # 登録済みキャラクター一覧（個別編集カード）
+  chars_list = st.session_state.characters
+  for idx, char in enumerate(chars_list):
+    cid = char["id"]
+    status_badge = "🟢 読込ON" if char.get("active", True) else "⚪ 待機OFF"
+    preview_txt = char["desc"][:32].replace("\n", " ") + (
+        "…" if len(char["desc"]) > 32 else ""
+    )
+
+    with st.expander(
+        f"{status_badge} ｜ **{char['name']}** — {preview_txt}",
+        expanded=False,
+    ):
+      c_col1, c_col2, c_col3, c_col4 = st.columns([4, 2, 1, 1])
+      with c_col1:
+        updated_name = st.text_input(
+            "キャラクター名", value=char["name"], key=f"cname_{cid}"
+        )
+      with c_col2:
+        st.write("")
+        st.write("")
+        updated_active = st.checkbox(
+            "AIに読み込む",
+            value=char.get("active", True),
+            key=f"cact_{cid}",
+        )
+      with c_col3:
+        st.write("")
+        st.write("")
+        if st.button("↑", key=f"cup_{cid}", disabled=(idx == 0)):
+          chars_list[idx - 1], chars_list[idx] = (
+              chars_list[idx],
+              chars_list[idx - 1],
+          )
+          st.rerun()
+      with c_col4:
+        st.write("")
+        st.write("")
+        if st.button(
+            "↓", key=f"cdown_{cid}", disabled=(idx == len(chars_list) - 1)
+        ):
+          chars_list[idx + 1], chars_list[idx] = (
+              chars_list[idx],
+              chars_list[idx + 1],
+          )
+          st.rerun()
+
+      updated_desc = st.text_area(
+          "関係性・性格・呼び方・秘密の設定",
+          value=char["desc"],
+          height=110,
+          key=f"cdesc_{cid}",
+      )
+
+      chars_list[idx]["name"] = updated_name
+      chars_list[idx]["active"] = updated_active
+      chars_list[idx]["desc"] = updated_desc
+
+      if st.button(f"🗑️ {char['name']} を削除", key=f"cdel_{cid}"):
+        st.session_state.characters.pop(idx)
+        st.session_state.messages = save_structured_memo(
+            st.session_state.messages,
+            st.session_state.world_text,
+            st.session_state.characters,
+        )
+        commit_save_data(st.session_state.summaries, st.session_state.messages)
+        st.toast(f"🗑️ {char['name']} を削除しました")
+        st.rerun()
+
+elif st.session_state.selected_act is not None:
+  # ==========================================
+  # 過去幕の回想画面
+  # ==========================================
   act_idx = st.session_state.selected_act
   target_act = act_idx + 1
   col_t, col_b = st.columns([4, 1])
@@ -607,6 +823,9 @@ if st.session_state.selected_act is not None:
     )
 
 else:
+  # ==========================================
+  # 最新の執筆画面
+  # ==========================================
   st.title("幻想郷 真斉幻想禄")
 
   for msg in current_act_messages:
@@ -621,8 +840,10 @@ else:
     st.session_state.messages.append(user_msg)
     display_novel_entry("user", action_input)
 
-    # ★1. 基本設定・関係性メモの読み込み（サニタイズ適用）
-    raw_memo = get_world_memo(st.session_state.messages)
+    # ★1. 世界観＋有効キャラクター設定の組み立て（サニタイズ適用）
+    raw_memo = build_prompt_memo_text(
+        st.session_state.world_text, st.session_state.characters
+    )
     memo_block = (
         f"【不変の基本設定・キャラクター関係性メモ】\n{sanitize_for_api(raw_memo)}\n\n"
         if raw_memo
@@ -672,7 +893,6 @@ else:
     used_fallback = False
 
     with st.spinner("幻想郷の時間を進めています..."):
-      # ★無駄な3重課金を防ぐため最大2回までに制限し、万一の2回目は4-hydrogenで確実に拾う省エネ設計
       for attempt_idx, (msg_limit, use_model) in enumerate(
           [(context_rounds * 2, selected_model), (2, "models/gemini-4-hydrogen")]
       ):
@@ -682,7 +902,6 @@ else:
             for m in recent_messages
         ])
 
-        # ★1発目から常時出力検閲ガードを添えることで、4.0-argonの出力途中中断（丸損リトライ）を未然に防止
         safety_steering = "※執筆指針：出力フィルターの誤検知を防ぐため、直接的な解剖学用語や過激な単語は避け、吐息や視線、感情の機微と人外の格の違いを上品かつ濃厚な文芸表現で描くこと。\n"
 
         full_contents = f"""
