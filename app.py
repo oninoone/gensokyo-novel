@@ -1,9 +1,12 @@
+import html
 import json
 import re
+import time
 import uuid
 from google import genai
 from google.genai import types
 import streamlit as st
+import streamlit.components.v1 as components
 from supabase import create_client
 
 # 1. 接続初期化
@@ -312,6 +315,36 @@ def calc_usage_cost(usage_meta, model_name="models/gemini-4-argon"):
   return usd * USD_JPY, un_in_tok, cache_tok, th_tok, out_tok
 
 
+# ★画面スクロール制御用ヘルパー
+def execute_scroll(direction="top"):
+  nonce = time.time()
+  target_y = "0" if direction == "top" else "el.scrollHeight"
+  win_y = "0" if direction == "top" else "doc.body.scrollHeight"
+  js_code = f"""
+    <script>
+    // scroll trigger: {nonce}
+    setTimeout(() => {{
+        const doc = window.parent.document;
+        const selectors = [
+            '[data-testid="stMain"]',
+            'section.main',
+            '[data-testid="stAppViewContainer"]',
+            'html',
+            'body'
+        ];
+        selectors.forEach(sel => {{
+            const el = doc.querySelector(sel);
+            if (el && el.scrollTo) {{
+                el.scrollTo({{ top: {target_y}, behavior: 'smooth' }});
+            }}
+        }});
+        window.parent.scrollTo({{ top: {win_y}, behavior: 'smooth' }});
+    }}, 120);
+    </script>
+    """
+  components.html(js_code, height=0)
+
+
 # 2. DB操作 & 設定データの構造化管理
 def fetch_save_data():
   try:
@@ -341,7 +374,6 @@ def parse_legacy_memo(raw_text):
     return "", []
   world_lines = []
   characters = []
-  # 行頭の「・」から最初の全角「：」までをキャラ名として取得（名前の途中の「・」はそのまま保持）
   char_pattern = re.compile(r"^・\s*([^：]+)：\s*(.+)$")
 
   for line in raw_text.splitlines():
@@ -385,7 +417,6 @@ def get_structured_memo(messages):
   except Exception:
     pass
 
-  # まだ旧テキスト形式の場合は自動解析して返す
   return parse_legacy_memo(raw_content)
 
 
@@ -479,6 +510,18 @@ st.markdown(
     .user-entry, .user-entry p {
         color: #8c95a0 !important;
     }
+    /* キャラクター図鑑の読みやすい表示カード */
+    .char-read-card {
+        background-color: rgba(128, 128, 128, 0.08);
+        border-left: 4px solid #d9536f;
+        border-radius: 6px;
+        padding: 14px 18px;
+        margin: 6px 0 12px 0;
+        font-size: 1.02rem;
+        line-height: 1.85;
+        letter-spacing: 0.03em;
+        white-space: pre-wrap;
+    }
     </style>
 """,
     unsafe_allow_html=True,
@@ -503,6 +546,12 @@ for m in st.session_state.messages:
 if "selected_act" not in st.session_state:
   st.session_state.selected_act = None
 
+if "just_finished_act" not in st.session_state:
+  st.session_state.just_finished_act = False
+
+if "scroll_action" not in st.session_state:
+  st.session_state.scroll_action = None
+
 current_act_messages = [
     m for m in st.session_state.messages if m.get("act") == current_act
 ]
@@ -523,15 +572,26 @@ def display_novel_entry(role, content):
 
 
 with st.sidebar:
+  # ★画面上下クイックジャンプボタン
+  sc_col1, sc_col2 = st.columns(2)
+  with sc_col1:
+    if st.button("⬆️ 一番上へ", use_container_width=True):
+      st.session_state.scroll_action = "top"
+  with sc_col2:
+    if st.button("⬇️ 一番下へ", use_container_width=True):
+      st.session_state.scroll_action = "bottom"
+
   st.title("📜 記憶アーカイブ")
 
   if st.session_state.selected_act is not None:
     if st.button(
-        "↩ 現在へ戻る（最新の執筆画面へ）",
+        f"↩ 現在へ戻る（第 {current_act} 幕へ）",
         type="primary",
         use_container_width=True,
     ):
       st.session_state.selected_act = None
+      st.session_state.just_finished_act = False
+      st.session_state.scroll_action = "top"
       st.rerun()
   else:
     st.caption("📍 現在: 最新の幕を執筆中")
@@ -604,6 +664,7 @@ with st.sidebar:
     st.session_state.summaries = []
     st.session_state.messages = []
     st.session_state.selected_act = None
+    st.session_state.just_finished_act = False
     st.rerun()
 
   st.markdown("---")
@@ -624,6 +685,8 @@ with st.sidebar:
           use_container_width=True,
       ):
         st.session_state.selected_act = idx
+        st.session_state.just_finished_act = False
+        st.session_state.scroll_action = "bottom"
         st.rerun()
 
       new_title = st.text_input(
@@ -684,7 +747,7 @@ if nav_mode.startswith("📌"):
   st.session_state.world_text = st.text_area(
       "世界観メモ",
       value=st.session_state.world_text,
-      height=240,
+      height=220,
       label_visibility="collapsed",
       placeholder="大目標、種族ごとの感情の法則、勢力間の契約、現在の裏での動きなどを自由に記入してください。",
   )
@@ -692,10 +755,15 @@ if nav_mode.startswith("📌"):
   st.markdown("---")
   st.subheader("👥 登場人物・関係性図鑑")
   st.caption(
-      "💡 チェックを入れたキャラクターのみAIに常時読み込まれます。編集・並べ替え後は右上の「設定をすべて保存」を押してください。"
+      "💡 カードを開くと読みやすい閲覧表示になります。内容を書き換えたいときだけカード内の「✏️ 設定を編集」にチェックを入れてください。"
   )
 
-  # 新規キャラクター追加フォーム
+  # 検索フィルター ＋ 新規追加
+  search_query = st.text_input(
+      "🔍 キャラクター検索（名前やキーワードで絞り込み）",
+      placeholder="例：レミリア、守矢、将棋、無意識…",
+  )
+
   with st.expander("➕ 新しいキャラクターを追加する", expanded=False):
     with st.form("add_character_form", clear_on_submit=True):
       new_c_name = st.text_input(
@@ -704,7 +772,7 @@ if nav_mode.startswith("📌"):
       )
       new_c_desc = st.text_area(
           "関係性・口調・設定",
-          height=100,
+          height=110,
           placeholder="例：大天狗。菅牧典を通じて守矢神社に話を通し、近々正式に真斉と面会しようと画策している。",
       )
       if st.form_submit_button("リストに追加", use_container_width=True):
@@ -726,89 +794,141 @@ if nav_mode.startswith("📌"):
           st.toast(f"✨ {new_c_name.strip()} を図鑑に追加＆保存しました！")
           st.rerun()
 
-  # 登録済みキャラクター一覧（個別編集カード）
+  # 登録済みキャラクター一覧
   chars_list = st.session_state.characters
+  q_lower = search_query.strip().lower()
+
   for idx, char in enumerate(chars_list):
+    if q_lower and (
+        q_lower not in char["name"].lower()
+        and q_lower not in char["desc"].lower()
+    ):
+      continue
+
     cid = char["id"]
     status_badge = "🟢 読込ON" if char.get("active", True) else "⚪ 待機OFF"
-    preview_txt = char["desc"][:32].replace("\n", " ") + (
-        "…" if len(char["desc"]) > 32 else ""
+    preview_txt = char["desc"][:38].replace("\n", " ") + (
+        "…" if len(char["desc"]) > 38 else ""
     )
 
     with st.expander(
         f"{status_badge} ｜ **{char['name']}** — {preview_txt}",
         expanded=False,
     ):
-      c_col1, c_col2, c_col3, c_col4 = st.columns([4, 2, 1, 1])
-      with c_col1:
-        updated_name = st.text_input(
-            "キャラクター名", value=char["name"], key=f"cname_{cid}"
-        )
-      with c_col2:
-        st.write("")
-        st.write("")
-        updated_active = st.checkbox(
-            "AIに読み込む",
-            value=char.get("active", True),
-            key=f"cact_{cid}",
-        )
-      with c_col3:
-        st.write("")
-        st.write("")
-        if st.button("↑", key=f"cup_{cid}", disabled=(idx == 0)):
-          chars_list[idx - 1], chars_list[idx] = (
-              chars_list[idx],
-              chars_list[idx - 1],
-          )
-          st.rerun()
-      with c_col4:
-        st.write("")
-        st.write("")
-        if st.button(
-            "↓", key=f"cdown_{cid}", disabled=(idx == len(chars_list) - 1)
-        ):
-          chars_list[idx + 1], chars_list[idx] = (
-              chars_list[idx],
-              chars_list[idx + 1],
-          )
-          st.rerun()
-
-      updated_desc = st.text_area(
-          "関係性・性格・呼び方・秘密の設定",
-          value=char["desc"],
-          height=110,
-          key=f"cdesc_{cid}",
+      # ★まずは読みやすいスタイル付き閲覧カードを表示
+      safe_desc = html.escape(char["desc"]) if char["desc"].strip() else "（設定未記入）"
+      st.markdown(
+          f'<div class="char-read-card">{safe_desc}</div>',
+          unsafe_allow_html=True,
       )
 
-      chars_list[idx]["name"] = updated_name
-      chars_list[idx]["active"] = updated_active
-      chars_list[idx]["desc"] = updated_desc
+      # ★編集・並べ替え用トグル（必要なときだけ展開）
+      is_editing = st.checkbox(
+          "✏️ このキャラの設定を編集・並べ替え", key=f"edit_mode_{cid}"
+      )
+      if is_editing:
+        c_col1, c_col2, c_col3, c_col4 = st.columns([4, 2, 1, 1])
+        with c_col1:
+          updated_name = st.text_input(
+              "キャラクター名", value=char["name"], key=f"cname_{cid}"
+          )
+        with c_col2:
+          st.write("")
+          st.write("")
+          updated_active = st.checkbox(
+              "AIに読み込む",
+              value=char.get("active", True),
+              key=f"cact_{cid}",
+          )
+        with c_col3:
+          st.write("")
+          st.write("")
+          if st.button("↑", key=f"cup_{cid}", disabled=(idx == 0)):
+            chars_list[idx - 1], chars_list[idx] = (
+                chars_list[idx],
+                chars_list[idx - 1],
+            )
+            st.rerun()
+        with c_col4:
+          st.write("")
+          st.write("")
+          if st.button(
+              "↓", key=f"cdown_{cid}", disabled=(idx == len(chars_list) - 1)
+          ):
+            chars_list[idx + 1], chars_list[idx] = (
+                chars_list[idx],
+                chars_list[idx + 1],
+            )
+            st.rerun()
 
-      if st.button(f"🗑️ {char['name']} を削除", key=f"cdel_{cid}"):
-        st.session_state.characters.pop(idx)
-        st.session_state.messages = save_structured_memo(
-            st.session_state.messages,
-            st.session_state.world_text,
-            st.session_state.characters,
+        updated_desc = st.text_area(
+            "関係性・性格・呼び方・秘密の設定",
+            value=char["desc"],
+            height=130,
+            key=f"cdesc_{cid}",
         )
-        commit_save_data(st.session_state.summaries, st.session_state.messages)
-        st.toast(f"🗑️ {char['name']} を削除しました")
-        st.rerun()
+
+        chars_list[idx]["name"] = updated_name
+        chars_list[idx]["active"] = updated_active
+        chars_list[idx]["desc"] = updated_desc
+
+        b_col1, b_col2 = st.columns([3, 1])
+        with b_col1:
+          if st.button(
+              "💾 この変更を保存",
+              key=f"csave_{cid}",
+              type="primary",
+              use_container_width=True,
+          ):
+            st.session_state.messages = save_structured_memo(
+                st.session_state.messages,
+                st.session_state.world_text,
+                st.session_state.characters,
+            )
+            commit_save_data(
+                st.session_state.summaries, st.session_state.messages
+            )
+            st.toast(f"💾 {updated_name} の設定を保存しました！")
+            st.rerun()
+        with b_col2:
+          if st.button(
+              "🗑️ 削除", key=f"cdel_{cid}", use_container_width=True
+          ):
+            st.session_state.characters.pop(idx)
+            st.session_state.messages = save_structured_memo(
+                st.session_state.messages,
+                st.session_state.world_text,
+                st.session_state.characters,
+            )
+            commit_save_data(
+                st.session_state.summaries, st.session_state.messages
+            )
+            st.toast(f"🗑️ {char['name']} を削除しました")
+            st.rerun()
 
 elif st.session_state.selected_act is not None:
   # ==========================================
-  # 過去幕の回想画面
+  # 過去幕・完結幕の回想画面
   # ==========================================
   act_idx = st.session_state.selected_act
   target_act = act_idx + 1
   col_t, col_b = st.columns([4, 1])
   with col_t:
-    st.title(f"📖 第 {target_act} 幕の記憶（回想中）")
+    title_suffix = (
+        "（完結・最終出力）"
+        if st.session_state.just_finished_act
+        else "（回想中）"
+    )
+    st.title(f"📖 第 {target_act} 幕の記憶{title_suffix}")
   with col_b:
     if st.button(
-        "↩ 現在へ", key="back_to_present_main", use_container_width=True
+        f"✨ 第 {current_act} 幕へ",
+        key="back_to_present_main",
+        use_container_width=True,
     ):
       st.session_state.selected_act = None
+      st.session_state.just_finished_act = False
+      st.session_state.scroll_action = "top"
       st.rerun()
 
   reminiscence_messages = [
@@ -821,6 +941,22 @@ elif st.session_state.selected_act is not None:
     st.info(
         f"💡 第 {target_act} 幕の生ログは、完全保存機能の導入前の幕のため保管されていません。左サイドバーの「要約本文」から当時の記録をお楽しみください。"
     )
+
+  st.markdown("---")
+  if st.session_state.just_finished_act:
+    st.success(
+        f"🎉 第 {target_act} 幕（全{WINDOW_ROUNDS}往復）が完結し、記憶アーカイブへ要約を記録しました！"
+    )
+  if st.button(
+      f"✨ 第 {current_act} 幕（新しい幕）へ進む",
+      key="proceed_next_act_bottom",
+      type="primary",
+      use_container_width=True,
+  ):
+    st.session_state.selected_act = None
+    st.session_state.just_finished_act = False
+    st.session_state.scroll_action = "top"
+    st.rerun()
 
 else:
   # ==========================================
@@ -991,6 +1127,10 @@ USER: {sanitized_action}
         with st.spinner("一幕の記憶を要約アーカイブへ記録中..."):
           new_summary, sum_cost = summarize_old_context(updated_act_messages)
           st.session_state.summaries.append(new_summary)
+          # ★完結した幕の最終出力をそのまま読めるよう、該当幕を表示したまま最下部へスクロール
+          st.session_state.selected_act = len(st.session_state.summaries) - 1
+          st.session_state.just_finished_act = True
+          st.session_state.scroll_action = "bottom"
 
       total_turn_cost = jpy_cost + sum_cost
       sum_note = f" (うち自動要約: {sum_cost:.2f}円)" if sum_cost > 0 else ""
@@ -1002,3 +1142,8 @@ USER: {sanitized_action}
 
       commit_save_data(st.session_state.summaries, st.session_state.messages)
       st.rerun()
+
+# 6. ページ描画完了後のスクロール実行
+if st.session_state.scroll_action:
+  execute_scroll(st.session_state.scroll_action)
+  st.session_state.scroll_action = None
