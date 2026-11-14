@@ -1,4 +1,3 @@
-import html
 import json
 import re
 import time
@@ -315,31 +314,38 @@ def calc_usage_cost(usage_meta, model_name="models/gemini-4-argon"):
   return usd * USD_JPY, un_in_tok, cache_tok, th_tok, out_tok
 
 
-# ★画面スクロール制御用ヘルパー
+# ★画面スクロール制御用ヘルパー（chat_inputありの執筆画面でも確実に動作）
 def execute_scroll(direction="top"):
   nonce = time.time()
+  anchor_id = "page-top-anchor" if direction == "top" else "page-bottom-anchor"
+  block_pos = "start" if direction == "top" else "end"
   target_y = "0" if direction == "top" else "el.scrollHeight"
   win_y = "0" if direction == "top" else "doc.body.scrollHeight"
+
   js_code = f"""
     <script>
     // scroll trigger: {nonce}
-    setTimeout(() => {{
+    const doScroll = () => {{
         const doc = window.parent.document;
-        const selectors = [
-            '[data-testid="stMain"]',
-            'section.main',
-            '[data-testid="stAppViewContainer"]',
-            'html',
-            'body'
-        ];
-        selectors.forEach(sel => {{
-            const el = doc.querySelector(sel);
-            if (el && el.scrollTo) {{
-                el.scrollTo({{ top: {target_y}, behavior: 'smooth' }});
+        // 1. 専用アンカー要素へスクロール
+        const anchor = doc.getElementById('{anchor_id}');
+        if (anchor) {{
+            anchor.scrollIntoView({{ behavior: 'smooth', block: '{block_pos}' }});
+        }}
+        // 2. サイドバー以外のスクロール可能な全コンテナを走査してスクロール
+        doc.querySelectorAll('*').forEach(el => {{
+            if (el.closest('[data-testid="stSidebar"]')) return;
+            if (el.scrollHeight > el.clientHeight + 10) {{
+                const style = window.parent.getComputedStyle(el);
+                if (style.overflowY === 'auto' || style.overflowY === 'scroll' || el.tagName === 'HTML' || el.tagName === 'BODY') {{
+                    el.scrollTo({{ top: {target_y}, behavior: 'smooth' }});
+                }}
             }}
         }});
         window.parent.scrollTo({{ top: {win_y}, behavior: 'smooth' }});
-    }}, 120);
+    }};
+    setTimeout(doScroll, 80);
+    setTimeout(doScroll, 320);
     </script>
     """
   components.html(js_code, height=0)
@@ -509,18 +515,6 @@ st.markdown(
     }
     .user-entry, .user-entry p {
         color: #8c95a0 !important;
-    }
-    /* キャラクター図鑑の読みやすい表示カード */
-    .char-read-card {
-        background-color: rgba(128, 128, 128, 0.08);
-        border-left: 4px solid #d9536f;
-        border-radius: 6px;
-        padding: 14px 18px;
-        margin: 6px 0 12px 0;
-        font-size: 1.02rem;
-        line-height: 1.85;
-        letter-spacing: 0.03em;
-        white-space: pre-wrap;
     }
     </style>
 """,
@@ -707,7 +701,9 @@ with st.sidebar:
         )
         st.rerun()
 
-# 5. メイン画面の描画（モード切替付き）
+# 5. メイン画面の描画（最上部アンカー設置）
+st.markdown('<div id="page-top-anchor"></div>', unsafe_allow_html=True)
+
 active_char_count = sum(
     1 for c in st.session_state.characters if c.get("active", True)
 )
@@ -754,15 +750,18 @@ if nav_mode.startswith("📌"):
 
   st.markdown("---")
   st.subheader("👥 登場人物・関係性図鑑")
-  st.caption(
-      "💡 カードを開くと読みやすい閲覧表示になります。内容を書き換えたいときだけカード内の「✏️ 設定を編集」にチェックを入れてください。"
-  )
 
-  # 検索フィルター ＋ 新規追加
-  search_query = st.text_input(
-      "🔍 キャラクター検索（名前やキーワードで絞り込み）",
-      placeholder="例：レミリア、守矢、将棋、無意識…",
-  )
+  # 検索フィルター ＋ 一括展開トグル
+  s_col1, s_col2 = st.columns([3, 1])
+  with s_col1:
+    search_query = st.text_input(
+        "🔍 キャラクター検索（名前・陣営・キーワードで絞り込み）",
+        placeholder="例：レミリア、紅魔館、守矢、将棋…",
+    )
+  with s_col2:
+    st.write("")
+    st.write("")
+    expand_all = st.toggle("📂 全キャラを一括展開", value=False)
 
   with st.expander("➕ 新しいキャラクターを追加する", expanded=False):
     with st.form("add_character_form", clear_on_submit=True):
@@ -771,9 +770,9 @@ if nav_mode.startswith("📌"):
           placeholder="例：飯綱丸龍",
       )
       new_c_desc = st.text_area(
-          "関係性・口調・設定",
+          "関係性・陣営・口調・設定",
           height=110,
-          placeholder="例：大天狗。菅牧典を通じて守矢神社に話を通し、近々正式に真斉と面会しようと画策している。",
+          placeholder="例：【妖怪の山】大天狗。菅牧典を通じて守矢神社に話を通し、近々正式に真斉と面会しようと画策している。",
       )
       if st.form_submit_button("リストに追加", use_container_width=True):
         if new_c_name.strip():
@@ -794,7 +793,7 @@ if nav_mode.startswith("📌"):
           st.toast(f"✨ {new_c_name.strip()} を図鑑に追加＆保存しました！")
           st.rerun()
 
-  # 登録済みキャラクター一覧
+  # 登録済みキャラクター一覧（短い見出し ＋ 1クリックで即編集可能）
   chars_list = st.session_state.characters
   q_lower = search_query.strip().lower()
 
@@ -806,105 +805,88 @@ if nav_mode.startswith("📌"):
       continue
 
     cid = char["id"]
-    status_badge = "🟢 読込ON" if char.get("active", True) else "⚪ 待機OFF"
-    preview_txt = char["desc"][:38].replace("\n", " ") + (
-        "…" if len(char["desc"]) > 38 else ""
-    )
+    status_icon = "🟢" if char.get("active", True) else "⚪"
 
+    # 見出しはアイコン＋キャラ名だけの短い表示に統一
     with st.expander(
-        f"{status_badge} ｜ **{char['name']}** — {preview_txt}",
-        expanded=False,
+        f"{status_icon} {char['name']}",
+        expanded=expand_all,
     ):
-      # ★まずは読みやすいスタイル付き閲覧カードを表示
-      safe_desc = html.escape(char["desc"]) if char["desc"].strip() else "（設定未記入）"
-      st.markdown(
-          f'<div class="char-read-card">{safe_desc}</div>',
-          unsafe_allow_html=True,
-      )
-
-      # ★編集・並べ替え用トグル（必要なときだけ展開）
-      is_editing = st.checkbox(
-          "✏️ このキャラの設定を編集・並べ替え", key=f"edit_mode_{cid}"
-      )
-      if is_editing:
-        c_col1, c_col2, c_col3, c_col4 = st.columns([4, 2, 1, 1])
-        with c_col1:
-          updated_name = st.text_input(
-              "キャラクター名", value=char["name"], key=f"cname_{cid}"
-          )
-        with c_col2:
-          st.write("")
-          st.write("")
-          updated_active = st.checkbox(
-              "AIに読み込む",
-              value=char.get("active", True),
-              key=f"cact_{cid}",
-          )
-        with c_col3:
-          st.write("")
-          st.write("")
-          if st.button("↑", key=f"cup_{cid}", disabled=(idx == 0)):
-            chars_list[idx - 1], chars_list[idx] = (
-                chars_list[idx],
-                chars_list[idx - 1],
-            )
-            st.rerun()
-        with c_col4:
-          st.write("")
-          st.write("")
-          if st.button(
-              "↓", key=f"cdown_{cid}", disabled=(idx == len(chars_list) - 1)
-          ):
-            chars_list[idx + 1], chars_list[idx] = (
-                chars_list[idx],
-                chars_list[idx + 1],
-            )
-            st.rerun()
-
-        updated_desc = st.text_area(
-            "関係性・性格・呼び方・秘密の設定",
-            value=char["desc"],
-            height=130,
-            key=f"cdesc_{cid}",
+      c_col1, c_col2, c_col3, c_col4, c_col5 = st.columns([4.5, 2, 0.8, 0.8, 0.9])
+      with c_col1:
+        updated_name = st.text_input(
+            "キャラクター名",
+            value=char["name"],
+            key=f"cname_{cid}",
+            label_visibility="collapsed",
         )
+      with c_col2:
+        updated_active = st.checkbox(
+            "AIに読み込む",
+            value=char.get("active", True),
+            key=f"cact_{cid}",
+        )
+      with c_col3:
+        if st.button("↑", key=f"cup_{cid}", disabled=(idx == 0), help="上へ移動"):
+          chars_list[idx - 1], chars_list[idx] = (
+              chars_list[idx],
+              chars_list[idx - 1],
+          )
+          st.rerun()
+      with c_col4:
+        if st.button(
+            "↓",
+            key=f"cdown_{cid}",
+            disabled=(idx == len(chars_list) - 1),
+            help="下へ移動",
+        ):
+          chars_list[idx + 1], chars_list[idx] = (
+              chars_list[idx],
+              chars_list[idx + 1],
+          )
+          st.rerun()
+      with c_col5:
+        if st.button("🗑️", key=f"cdel_{cid}", help="このキャラを削除"):
+          st.session_state.characters.pop(idx)
+          st.session_state.messages = save_structured_memo(
+              st.session_state.messages,
+              st.session_state.world_text,
+              st.session_state.characters,
+          )
+          commit_save_data(
+              st.session_state.summaries, st.session_state.messages
+          )
+          st.toast(f"🗑️ {char['name']} を削除しました")
+          st.rerun()
 
-        chars_list[idx]["name"] = updated_name
-        chars_list[idx]["active"] = updated_active
-        chars_list[idx]["desc"] = updated_desc
+      # 文章の長さに合わせて高さを自動調整した編集枠を直接表示
+      auto_height = max(100, min(320, (len(char["desc"]) // 42 + 2) * 26))
+      updated_desc = st.text_area(
+          "関係性・性格・陣営・設定",
+          value=char["desc"],
+          height=auto_height,
+          key=f"cdesc_{cid}",
+          label_visibility="collapsed",
+      )
 
-        b_col1, b_col2 = st.columns([3, 1])
-        with b_col1:
-          if st.button(
-              "💾 この変更を保存",
-              key=f"csave_{cid}",
-              type="primary",
-              use_container_width=True,
-          ):
-            st.session_state.messages = save_structured_memo(
-                st.session_state.messages,
-                st.session_state.world_text,
-                st.session_state.characters,
-            )
-            commit_save_data(
-                st.session_state.summaries, st.session_state.messages
-            )
-            st.toast(f"💾 {updated_name} の設定を保存しました！")
-            st.rerun()
-        with b_col2:
-          if st.button(
-              "🗑️ 削除", key=f"cdel_{cid}", use_container_width=True
-          ):
-            st.session_state.characters.pop(idx)
-            st.session_state.messages = save_structured_memo(
-                st.session_state.messages,
-                st.session_state.world_text,
-                st.session_state.characters,
-            )
-            commit_save_data(
-                st.session_state.summaries, st.session_state.messages
-            )
-            st.toast(f"🗑️ {char['name']} を削除しました")
-            st.rerun()
+      chars_list[idx]["name"] = updated_name
+      chars_list[idx]["active"] = updated_active
+      chars_list[idx]["desc"] = updated_desc
+
+      if st.button(
+          f"💾 {updated_name} の変更を保存",
+          key=f"csave_{cid}",
+      ):
+        st.session_state.messages = save_structured_memo(
+            st.session_state.messages,
+            st.session_state.world_text,
+            st.session_state.characters,
+        )
+        commit_save_data(
+            st.session_state.summaries, st.session_state.messages
+        )
+        st.toast(f"💾 {updated_name} の設定を保存しました！")
+        st.rerun()
 
 elif st.session_state.selected_act is not None:
   # ==========================================
@@ -1143,7 +1125,9 @@ USER: {sanitized_action}
       commit_save_data(st.session_state.summaries, st.session_state.messages)
       st.rerun()
 
-# 6. ページ描画完了後のスクロール実行
+# 6. 最下部アンカー設置 ＆ スクロール実行
+st.markdown('<div id="page-bottom-anchor"></div>', unsafe_allow_html=True)
+
 if st.session_state.scroll_action:
   execute_scroll(st.session_state.scroll_action)
   st.session_state.scroll_action = None
