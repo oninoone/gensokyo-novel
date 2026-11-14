@@ -467,17 +467,20 @@ with st.sidebar:
       "🧠 執筆AIモデル",
       options=["models/gemini-4-argon", "models/gemini-4-hydrogen"],
       index=0,
-      help="4.0-argonは最高品質、4-hydrogenは試し。",
+      help="4-argonは最高品質、4-hydrogenはバランス。",
   )
 
   # ★新設：一番高い「思考トークン」を抑える上限スライダー（デフォルト256でコスト激減）
   thinking_limit = st.slider(
-      "💭 思考トークン上限（節約の要）",
-      min_value=0,
-      max_value=1536,
-      value=256,
-      step=128,
-      help="4.0-argonは256程度でも十分高品質な文章を書きます。",
+     "💭 思考レベル（節約の要）",
+      options=[0, 256, 1024, 4096],
+      value=1024,
+      format_func=lambda x: {
+          0: "オフ (0)",
+          256: "節約 (256)",
+          1024: "標準 (1024)",
+          4096: "高度 (4096)",
+      help="4.0-argonは256程度でも高品質な文章を書きます。",
   )
 
   # ★AIに送る直近生ログの往復数スライダー
