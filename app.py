@@ -290,15 +290,24 @@ def calc_usage_cost(usage_meta, model_name="models/gemini-4-argon"):
     th_tok = total_tok - in_tok - out_tok
 
   un_in_tok = max(0, in_tok - cache_tok)
-  # 4-hydrogen 選択時はおよそ半額のレートで試算
-  rate_mult = 1.0 if "4-hydrogen" in model_name else 2.0
-  usd = (
-      (un_in_tok * 2.0 / 1_000_000)
-      + (cache_tok * 0.10 / 1_000_000)
-      + ((out_tok + th_tok) * 10.0 / 1_000_000)
-  ) * rate_mult
-  return usd * USD_JPY, un_in_tok, cache_tok, th_tok, out_tok
 
+  # モデル別の100万トークンあたり単価（USD）
+  if "4-hydrogen" in model_name:
+    in_rate = 1.50
+    cache_rate = 0.15
+    out_rate = 7.50
+  else:
+    # 4-argon 用の単価
+    in_rate = 4.00
+    cache_rate = 0.20
+    out_rate = 20.00
+
+  usd = (
+      (un_in_tok * in_rate / 1_000_000)
+      + (cache_tok * cache_rate / 1_000_000)
+      + ((out_tok + th_tok) * out_rate / 1_000_000)
+  )
+  return usd * USD_JPY, un_in_tok, cache_tok, th_tok, out_tok
 
 # 2. DB操作
 def fetch_save_data():
@@ -362,7 +371,8 @@ def summarize_old_context(raw_messages):
           model="models/gemini-4-hydrogen",
           contents=prompt,
           config=types.GenerateContentConfig(
-              safety_settings=CUSTOM_SAFETY_SETTINGS
+              safety_settings=CUSTOM_SAFETY_SETTINGS,
+              thinking_config=types.ThinkingConfig(thinking_budget=128),
           ),
       )
       sum_cost, _, _, _, _ = calc_usage_cost(
