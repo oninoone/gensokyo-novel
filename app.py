@@ -290,8 +290,8 @@ def calc_usage_cost(usage_meta, model_name="models/gemini-4-argon"):
     th_tok = total_tok - in_tok - out_tok
 
   un_in_tok = max(0, in_tok - cache_tok)
-  # 3.8-flash 選択時はおよそ半額のレートで試算
-  rate_mult = 1.0 if "3.8-flash" in model_name else 2.0
+  # 4-hydrogen 選択時はおよそ半額のレートで試算
+  rate_mult = 1.0 if "4-hydrogen" in model_name else 2.0
   usd = (
       (un_in_tok * 2.0 / 1_000_000)
       + (cache_tok * 0.10 / 1_000_000)
@@ -339,7 +339,7 @@ def set_world_memo(messages, new_memo):
   return filtered
 
 
-# 3. 10往復到達時の自動要約（★裏方の要約は常に低コストな 3.8-flash で固定）
+# 3. 10往復到達時の自動要約（★裏方の要約は4-hydrogen で固定）
 def summarize_old_context(raw_messages):
   for slice_count in [len(raw_messages), 6]:
     target_msgs = raw_messages[-slice_count:]
@@ -359,14 +359,14 @@ def summarize_old_context(raw_messages):
 """
     try:
       resp = gemini_client.models.generate_content(
-          model="models/gemini-3.8-flash",
+          model="models/gemini-4-hydrogen",
           contents=prompt,
           config=types.GenerateContentConfig(
               safety_settings=CUSTOM_SAFETY_SETTINGS
           ),
       )
       sum_cost, _, _, _, _ = calc_usage_cost(
-          getattr(resp, "usage_metadata", None), "models/gemini-3.8-flash"
+          getattr(resp, "usage_metadata", None), "models/gemini-4-hydrogen"
       )
       if resp.text and not is_refusal_response(resp.text):
         return resp.text.strip(), sum_cost
@@ -455,9 +455,9 @@ with st.sidebar:
   # ★新設：執筆モデルのワンタッチ切り替え（デフォルトは 4.0-argon）
   selected_model = st.selectbox(
       "🧠 執筆AIモデル",
-      options=["models/gemini-4-argon", "models/gemini-3.8-flash"],
+      options=["models/gemini-4-argon", "models/gemini-4-hydrogen"],
       index=0,
-      help="4.0-argonは最高品質、3.8-flashは超低コスト。",
+      help="4.0-argonは最高品質、4-hydrogenは試し。",
   )
 
   # ★新設：一番高い「思考トークン」を抑える上限スライダー（デフォルト256でコスト激減）
@@ -656,9 +656,9 @@ else:
     used_fallback = False
 
     with st.spinner("幻想郷の時間を進めています..."):
-      # ★無駄な3重課金を防ぐため最大2回までに制限し、万一の2回目は3.8-flashで確実に拾う省エネ設計
+      # ★無駄な3重課金を防ぐため最大2回までに制限し、万一の2回目は4-hydrogenで確実に拾う省エネ設計
       for attempt_idx, (msg_limit, use_model) in enumerate(
-          [(context_rounds * 2, selected_model), (2, "models/gemini-3.8-flash")]
+          [(context_rounds * 2, selected_model), (2, "models/gemini-4-hydrogen")]
       ):
         recent_messages = all_recent_candidates[-msg_limit:]
         history_text = "\n".join([
