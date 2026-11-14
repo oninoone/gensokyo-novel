@@ -471,7 +471,7 @@ with st.sidebar:
   )
 
   # ★新設：一番高い「思考トークン」を抑える上限スライダー（デフォルト256でコスト激減）
-  thinking_limit = st.slider(
+  thinking_limit = st.select_slider(
      "💭 思考レベル（節約の要）",
       options=[0, 256, 1024, 4096],
       value=1024,
