@@ -537,54 +537,64 @@ st.markdown(
         color: #8c95a0 !important;
     }
 
-    /* ★キャラカード内：スマホ幅でも1行ヘッダー（名前＋読込チェック＋開閉）を絶対に横並び維持 */
-    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] {
+    /* ★キャラカード内：スマホ幅でも1行ヘッダー（名前＋読込＋開閉）を強制的に横並び維持 */
+    div[data-testid="stHorizontalBlock"]:has(input[aria-label="キャラ名"]) {
+        display: flex !important;
+        flex-direction: row !important;
         flex-wrap: nowrap !important;
         align-items: center !important;
-        gap: 0.35rem !important;
+        gap: 6px !important;
+        width: 100% !important;
     }
-    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+    div[data-testid="stHorizontalBlock"]:has(input[aria-label="キャラ名"]) > div {
         min-width: 0 !important;
+        max-width: none !important;
     }
-    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(1) {
+    /* 1列目：キャラ名（残りの横幅をすべて使う） */
+    div[data-testid="stHorizontalBlock"]:has(input[aria-label="キャラ名"]) > div:nth-child(1) {
         flex: 1 1 auto !important;
         width: auto !important;
     }
-    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(2),
-    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(3) {
+    /* 2列目：チェックボックス（中身分の幅だけ確保） */
+    div[data-testid="stHorizontalBlock"]:has(input[aria-label="キャラ名"]) > div:nth-child(2) {
+        flex: 0 0 auto !important;
+        width: auto !important;
+    }
+    /* 3列目：開閉ボタン（中身分の幅だけ確保） */
+    div[data-testid="stHorizontalBlock"]:has(input[aria-label="キャラ名"]) > div:nth-child(3) {
         flex: 0 0 auto !important;
         width: auto !important;
     }
 
-    /* キャラ名入力欄を「1行の見出し（タップで直接編集可）」風にスリム化 */
-    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] input {
+    /* キャラ名入力欄を1行の見出し風にスリム化 */
+    input[aria-label="キャラ名"] {
         font-weight: 700 !important;
-        font-size: 1.02rem !important;
-        padding: 0.3rem 0.5rem !important;
+        font-size: 1.0rem !important;
+        padding: 0.25rem 0.45rem !important;
         background-color: transparent !important;
         border: 1px solid transparent !important;
         border-radius: 6px !important;
     }
-    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] input:hover,
-    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] input:focus {
+    input[aria-label="キャラ名"]:hover,
+    input[aria-label="キャラ名"]:focus {
         background-color: rgba(128, 128, 128, 0.12) !important;
         border: 1px solid rgba(217, 83, 111, 0.5) !important;
     }
 
-    /* チェックボックスと開閉ボタンをコンパクトに整列 */
-    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stCheckbox"] {
-        margin-top: 0 !important;
-        margin-bottom: 0 !important;
+    /* チェックボックスと開閉ボタンの余白・折り返し防止 */
+    div[data-testid="stHorizontalBlock"]:has(input[aria-label="キャラ名"]) [data-testid="stCheckbox"] {
+        margin: 0 !important;
         white-space: nowrap !important;
     }
-    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stCheckbox"] label p {
+    div[data-testid="stHorizontalBlock"]:has(input[aria-label="キャラ名"]) [data-testid="stCheckbox"] label p {
         font-size: 0.88rem !important;
         margin-bottom: 0 !important;
         line-height: 1.2 !important;
     }
-    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] button {
-        padding: 0.25rem 0.55rem !important;
-        min-height: 2.1rem !important;
+    div[data-testid="stHorizontalBlock"]:has(input[aria-label="キャラ名"]) button {
+        padding: 0.2rem 0.55rem !important;
+        min-height: 2rem !important;
+        width: auto !important;
     }
     </style>
 """,
@@ -909,7 +919,6 @@ if nav_mode == "📌 世界観・キャラ設定":
             "読込",
             value=char.get("active", True),
             key=f"cact_{cid}",
-            help="チェックを入れるとAIにこのキャラの設定を読み込ませます",
         )
       with h_col3:
         toggle_label = "▲" if is_open else "▼"
