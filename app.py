@@ -8,9 +8,22 @@ import streamlit as st
 import streamlit.components.v1 as components
 from supabase import create_client
 
-# 1. 接続初期化
-gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+
+# 1. 接続初期化（@st.cache_resourceで接続を使い回し、暗黙キャッシュのヒット率を最大化）
+@st.cache_resource
+def get_gemini_client():
+  return genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+
+
+@st.cache_resource
+def get_supabase_client():
+  return create_client(
+      st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"]
+  )
+
+
+gemini_client = get_gemini_client()
+supabase = get_supabase_client()
 
 SAVE_ID = "main_story"
 WINDOW_ROUNDS = 10  # 10往復（20メッセージ）を一幕として管理
@@ -281,7 +294,7 @@ def is_refusal_response(text):
   return False
 
 
-# ★直近ログをGemini API本来のマルチターン配列（user / model）に整える関数（暗黙キャッシュ最適化）
+# ★直近ログをGemini API本来のマルチターン配列（user / model）に整える関数
 def build_multiturn_contents(recent_messages, sanitized_action, safety_steering):
   contents = []
   for m in recent_messages:
@@ -331,6 +344,23 @@ def build_multiturn_contents(recent_messages, sanitized_action, safety_steering)
         )
     )
   return contents
+
+
+# ★usage_metadata の生データを診断用に整形する関数
+def format_usage_raw(usage_meta):
+  if not usage_meta:
+    return "usage_metadata: None"
+  try:
+    if hasattr(usage_meta, "model_dump"):
+      return json.dumps(
+          usage_meta.model_dump(exclude_none=False),
+          ensure_ascii=False,
+          indent=2,
+          default=str,
+      )
+    return str(usage_meta)
+  except Exception:
+    return str(usage_meta)
 
 
 # ★usage_metadataから隠れ思考トークンを含めて正確に料金を計算する関数（モデル別単価対応）
@@ -768,7 +798,14 @@ with st.sidebar:
   if "last_cost_info" in st.session_state:
     st.info(st.session_state.last_cost_info)
 
-  # ★執筆モデルのワンタッチ切り替え（初期値を 4-hydrogen に設定）
+  # ★送信文字数の内訳 ＆ usage_metadata 生データの診断パネル
+  if "last_debug_info" in st.session_state:
+    with st.expander("🔍 送信内訳・キャッシュ診断", expanded=False):
+      st.markdown(st.session_state.last_debug_info["breakdown"])
+      st.caption("API usage_metadata 生データ")
+      st.code(st.session_state.last_debug_info["usage_raw"], language="json")
+
+  # ★執筆モデルのワンタッチ切り替え（初期値を 4-neon に設定）
   selected_model = st.selectbox(
       "🧠 執筆AIモデル",
       options=[
@@ -776,7 +813,7 @@ with st.sidebar:
           "models/gemini-4-neon",
           "models/gemini-4-hydrogen",
       ],
-      index=2,
+      index=1,
       help="4-hydrogenは普段使い・コスパ最強、4-neonは新世代バランス型（キャッシュ95%OFF）、4-argonは最高品質。",
   )
 
@@ -792,27 +829,49 @@ with st.sidebar:
           2048: "深考 (2048)",
           3072: "特盛 (3072)",
       }[x],
-      help="Hydrogenは1024〜2048で整合性が安定します。",
+      help="Neonは実使用500前後で省エネ動作するため2048のままでも安心です。",
   )
 
-  # ★AIに送る直近生ログの往復数スライダー
+  # ★AIに送る直近生ログの往復数スライダー（初期値を 5 に設定）
   context_rounds = st.slider(
       "📡 AIへ送る直近ログ数（往復）",
       min_value=1,
       max_value=12,
-      value=3,
-      help="1〜2往復に絞ると突破＆節約可。",
+      value=5,
+      help="1〜2往復に絞ると突破＆節約可。4〜5往復で同じ幕内の整合性が安定します。",
   )
 
-  # ★全文を送る過去要約の幕数スライダー
+  # ★全文を送る過去要約の幕数スライダー（初期値を 3 に設定）
   max_sum_acts = max(1, len(st.session_state.summaries))
-  default_sum_acts = min(1, max_sum_acts)
+  default_sum_acts = min(3, max_sum_acts)
   full_summary_acts = st.slider(
       "📚 全文を送る過去要約（直近〇幕）",
       min_value=0,
       max_value=max_sum_acts,
       value=default_sum_acts,
-      help="これより古い幕は見出し＋末尾抜粋に圧縮します。",
+      help="直近の重要展開を全文でAIに渡します。",
+  )
+
+  # ★抜粋（見出し＋末尾70字）を送る幕数スライダー
+  default_excerpt_acts = min(15, max_sum_acts)
+  excerpt_summary_acts = st.slider(
+      "✂️ 抜粋を送る過去要約（その前の〇幕）",
+      min_value=0,
+      max_value=max_sum_acts,
+      value=default_excerpt_acts,
+      help="全文より古い幕のうち、見出し＋末尾70文字を残す幕数です。",
+  )
+
+  # ★さらに古い幕のダイエット設定
+  older_summary_mode = st.selectbox(
+      "🪶 さらに古い幕の扱い（ダイエット）",
+      options=[
+          "見出しのみ（超軽量）",
+          "送信しない（完全カット）",
+          "従来通り抜粋を送る",
+      ],
+      index=0,
+      help="「見出しのみ」にすると1幕あたり約20字まで圧縮し、長期連載でもトークン膨張を防ぎます。",
   )
 
   # 直前のやり取り（1手）を巻き戻す救急ボタン
@@ -1095,25 +1154,44 @@ else:
         else ""
     )
 
-    # ★2. 要約アーカイブをループの外で固定構築
+    # ★2. 要約アーカイブを3段階（全文 / 抜粋 / 古い幕の軽量化）で構築
     total_summaries = len(st.session_state.summaries)
+    full_start = total_summaries - full_summary_acts
+    excerpt_start = full_start - excerpt_summary_acts
+
     compressed_summaries = []
+    full_cnt = excerpt_cnt = title_cnt = skip_cnt = 0
+
     for idx, s in enumerate(st.session_state.summaries):
       sanitized_s = sanitize_for_api(s)
-      if full_summary_acts > 0 and idx >= total_summaries - full_summary_acts:
+      lines = [
+          line.strip()
+          for line in sanitized_s.strip().split("\n")
+          if line.strip()
+      ]
+      header = lines[0] if lines else "記録"
+      body_flat = "".join(lines[1:]) if len(lines) > 1 else ""
+      tail_text = body_flat[-70:] if len(body_flat) > 70 else body_flat
+
+      if full_summary_acts > 0 and idx >= full_start:
         compressed_summaries.append(f"[過去の記録 第{idx+1}幕]\n{sanitized_s}")
-      else:
-        lines = [
-            line.strip()
-            for line in sanitized_s.strip().split("\n")
-            if line.strip()
-        ]
-        header = lines[0] if lines else "記録"
-        body_flat = "".join(lines[1:]) if len(lines) > 1 else ""
-        tail_text = body_flat[-70:] if len(body_flat) > 70 else body_flat
+        full_cnt += 1
+      elif excerpt_summary_acts > 0 and idx >= excerpt_start:
         compressed_summaries.append(
             f"[第{idx+1}幕（抜粋）] {header} / …{tail_text}"
         )
+        excerpt_cnt += 1
+      else:
+        if older_summary_mode == "見出しのみ（超軽量）":
+          compressed_summaries.append(f"[第{idx+1}幕] {header}")
+          title_cnt += 1
+        elif older_summary_mode == "送信しない（完全カット）":
+          skip_cnt += 1
+        else:
+          compressed_summaries.append(
+              f"[第{idx+1}幕（抜粋）] {header} / …{tail_text}"
+          )
+          excerpt_cnt += 1
 
     summaries_context = "\n---\n".join(compressed_summaries)
     archive_block = (
@@ -1122,8 +1200,9 @@ else:
         else ""
     )
 
-    # ★3. 不変ブロックを system_instruction に統合して完全固定化（暗黙キャッシュ最優先）
-    system_parts = [SYSTEM_INSTRUCTION.strip()]
+    # ★3. 不変ブロックを system_instruction に統合して完全固定化
+    system_base_text = SYSTEM_INSTRUCTION.strip()
+    system_parts = [system_base_text]
     if memo_block:
       system_parts.append(memo_block)
     if archive_block:
@@ -1146,6 +1225,8 @@ else:
     jpy_cost = 0.0
     un_in_tok = cache_tok = th_tok = out_tok = 0
     used_fallback = False
+    last_usage_raw = "usage_metadata: None"
+    last_contents_chars = 0
 
     with st.spinner("幻想郷の時間を進めています..."):
       for attempt_idx, (msg_limit, use_model) in enumerate(
@@ -1154,6 +1235,11 @@ else:
         recent_messages = all_recent_candidates[-msg_limit:]
         multiturn_contents = build_multiturn_contents(
             recent_messages, sanitized_action, safety_steering
+        )
+        last_contents_chars = sum(
+            len(p.text or "")
+            for c in multiturn_contents
+            for p in (c.parts or [])
         )
 
         try:
@@ -1175,8 +1261,10 @@ else:
               config=gen_config,
           )
 
+          usage_meta = getattr(response, "usage_metadata", None)
+          last_usage_raw = format_usage_raw(usage_meta)
           step_cost, step_in, step_cache, step_th, step_out = calc_usage_cost(
-              getattr(response, "usage_metadata", None), use_model
+              usage_meta, use_model
           )
           jpy_cost += step_cost
           un_in_tok += step_in
@@ -1247,6 +1335,23 @@ else:
           f"- 入力: {un_in_tok:,} tok (キャッシュ: {cache_tok:,} tok)\n"
           f"- 思考: {th_tok:,} tok / 出力: {out_tok:,} tok"
       )
+
+      # 送信内訳と生メタデータの保存
+      sys_len = len(system_base_text)
+      memo_len = len(memo_block)
+      arc_len = len(archive_block)
+      total_chars = sys_len + memo_len + arc_len + last_contents_chars
+      st.session_state.last_debug_info = {
+          "breakdown": (
+              f"**送信文字数の内訳（計 {total_chars:,} 字）**\n"
+              f"- 基本指示: {sys_len:,} 字\n"
+              f"- 世界観・キャラ設定: {memo_len:,} 字\n"
+              f"- 過去要約: {arc_len:,} 字 "
+              f"（全文{full_cnt} / 抜粋{excerpt_cnt} / 見出し{title_cnt} / 除外{skip_cnt}）\n"
+              f"- 直近ログ＋入力: {last_contents_chars:,} 字"
+          ),
+          "usage_raw": last_usage_raw,
+      }
 
       commit_save_data(st.session_state.summaries, st.session_state.messages)
       st.rerun()
