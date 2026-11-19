@@ -301,6 +301,10 @@ def calc_usage_cost(usage_meta, model_name="models/gemini-4-argon"):
     in_rate = 1.50
     cache_rate = 0.15
     out_rate = 7.50
+  elif "4-neon" in model_name:
+    in_rate = 3.00
+    cache_rate = 0.15
+    out_rate = 15.00
   else:
     # 4-argon 用の単価
     in_rate = 4.00
@@ -715,9 +719,13 @@ with st.sidebar:
   # ★執筆モデルのワンタッチ切り替え（初期値を 4-hydrogen に設定）
   selected_model = st.selectbox(
       "🧠 執筆AIモデル",
-      options=["models/gemini-4-argon", "models/gemini-4-hydrogen"],
-      index=1,
-      help="4-hydrogenは普段使い・コスパ最強、4.0-argonは最高品質。",
+      options=[
+          "models/gemini-4-argon",
+          "models/gemini-4-neon",
+          "models/gemini-4-hydrogen",
+      ],
+      index=2,
+      help="4-hydrogenは普段使い・コスパ最強、4-neonは新世代バランス型（キャッシュ95%OFF）、4-argonは最高品質。",
   )
 
   # ★思考トークン上限（初期値を安定の 2048 に設定）
