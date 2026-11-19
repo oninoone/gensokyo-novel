@@ -281,6 +281,58 @@ def is_refusal_response(text):
   return False
 
 
+# ★直近ログをGemini API本来のマルチターン配列（user / model）に整える関数（暗黙キャッシュ最適化）
+def build_multiturn_contents(recent_messages, sanitized_action, safety_steering):
+  contents = []
+  for m in recent_messages:
+    api_role = "user" if m.get("role") == "user" else "model"
+    text = sanitize_for_api(m.get("content", "")).strip()
+    if not text:
+      text = "（そのまま状況を見守る）" if api_role == "user" else "……"
+
+    # API仕様上、会話配列の先頭は必ず user に揃える
+    if not contents and api_role != "user":
+      continue
+
+    # 同一ロールが連続した場合は結合してエラーを防止
+    if contents and contents[-1].role == api_role:
+      prev_text = contents[-1].parts[0].text
+      contents[-1] = types.Content(
+          role=api_role,
+          parts=[types.Part.from_text(text=f"{prev_text}\n\n{text}")],
+      )
+    else:
+      contents.append(
+          types.Content(
+              role=api_role,
+              parts=[types.Part.from_text(text=text)],
+          )
+      )
+
+  # 最新のユーザー入力（執筆指針は最新ターンのみに添え、過去ターンの前方一致を維持）
+  action_body = sanitized_action.strip() or "（そのまま現在の状況や行為をさらに一歩進める）"
+  latest_user_text = (
+      f"{action_body}\n\n"
+      f"{safety_steering}"
+      "※メタ発言を一切含めず、「・日時：」から直ちに小説の続きを執筆すること。"
+  )
+
+  if contents and contents[-1].role == "user":
+    prev_text = contents[-1].parts[0].text
+    contents[-1] = types.Content(
+        role="user",
+        parts=[types.Part.from_text(text=f"{prev_text}\n\n{latest_user_text}")],
+    )
+  else:
+    contents.append(
+        types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=latest_user_text)],
+        )
+    )
+  return contents
+
+
 # ★usage_metadataから隠れ思考トークンを含めて正確に料金を計算する関数（モデル別単価対応）
 def calc_usage_cost(usage_meta, model_name="models/gemini-4-argon"):
   if not usage_meta:
@@ -1003,9 +1055,7 @@ elif st.session_state.selected_act is not None:
 
   st.markdown("---")
   if st.session_state.just_finished_act:
-    st.success(
-        f"第 {target_act} 幕の要約を記録しました"
-    )
+    st.success(f"第 {target_act} 幕の要約を記録しました")
   if st.button(
       f"第 {current_act} 幕（新しい幕）へ進む",
       key="proceed_next_act_bottom",
@@ -1040,12 +1090,12 @@ else:
         st.session_state.world_text, st.session_state.characters
     )
     memo_block = (
-        f"【不変の基本設定・キャラクター関係性メモ】\n{sanitize_for_api(raw_memo)}\n\n"
+        f"【不変の基本設定・キャラクター関係性メモ】\n{sanitize_for_api(raw_memo)}"
         if raw_memo
         else ""
     )
 
-    # ★2. 要約アーカイブをループの外で固定構築（リトライ時も前方一致キャッシュを絶対に外さない）
+    # ★2. 要約アーカイブをループの外で固定構築
     total_summaries = len(st.session_state.summaries)
     compressed_summaries = []
     for idx, s in enumerate(st.session_state.summaries):
@@ -1067,10 +1117,18 @@ else:
 
     summaries_context = "\n---\n".join(compressed_summaries)
     archive_block = (
-        f"【過去の物語の要約・確定した歴史】\n{summaries_context}\n\n"
+        f"【過去の物語の要約・確定した歴史】\n{summaries_context}"
         if summaries_context
         else ""
     )
+
+    # ★3. 不変ブロックを system_instruction に統合して完全固定化（暗黙キャッシュ最優先）
+    system_parts = [SYSTEM_INSTRUCTION.strip()]
+    if memo_block:
+      system_parts.append(memo_block)
+    if archive_block:
+      system_parts.append(archive_block)
+    full_system_instruction = "\n\n".join(system_parts)
 
     prev_act_messages = [
         m for m in st.session_state.messages if m.get("act") == current_act - 1
@@ -1080,6 +1138,8 @@ else:
     ][:-1]
     all_recent_candidates = prev_act_messages + curr_act_without_last
     sanitized_action = sanitize_for_api(action_input)
+
+    safety_steering = "※執筆指針：出力フィルターの誤検知を防ぐため、直接的な解剖学用語や過激な単語は避け、吐息や視線、感情の機微と人外の格の違いを上品かつ濃厚な文芸表現で描くこと。\n"
 
     output_story = None
     error_detail = None
@@ -1092,24 +1152,14 @@ else:
           [(context_rounds * 2, selected_model), (2, "models/gemini-4-hydrogen")]
       ):
         recent_messages = all_recent_candidates[-msg_limit:]
-        history_text = "\n".join([
-            f"{m['role'].upper()}: {sanitize_for_api(m['content'])}"
-            for m in recent_messages
-        ])
+        multiturn_contents = build_multiturn_contents(
+            recent_messages, sanitized_action, safety_steering
+        )
 
-        safety_steering = "※執筆指針：出力フィルターの誤検知を防ぐため、直接的な解剖学用語や過激な単語は避け、吐息や視線、感情の機微と人外の格の違いを上品かつ濃厚な文芸表現で描くこと。\n"
-
-        full_contents = f"""
-{memo_block}{archive_block}【直近の情景と対話ログ】
-{history_text}
-
-USER: {sanitized_action}
-{safety_steering}ASSISTANT（メタ発言を一切含めず、「・日時：」から直ちに小説の続きを執筆）:
-"""
         try:
           curr_thinking = thinking_limit if attempt_idx == 0 else 256
           gen_config = types.GenerateContentConfig(
-              system_instruction=SYSTEM_INSTRUCTION,
+              system_instruction=full_system_instruction,
               temperature=0.85 if attempt_idx == 0 else 0.75,
               max_output_tokens=2048,
               safety_settings=CUSTOM_SAFETY_SETTINGS,
@@ -1121,7 +1171,7 @@ USER: {sanitized_action}
 
           response = gemini_client.models.generate_content(
               model=use_model,
-              contents=full_contents,
+              contents=multiturn_contents,
               config=gen_config,
           )
 
