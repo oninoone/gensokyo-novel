@@ -28,6 +28,7 @@ supabase = get_supabase_client()
 SAVE_ID = "main_story"
 WINDOW_ROUNDS = 10  # 10往復（20メッセージ）を一幕として管理
 USD_JPY = 158.58  # 現在の為替レート
+EMPTY_ACTION_PLACEHOLDER = "（そのまま現在の状況や行為をさらに一歩進める）"
 
 SYSTEM_INSTRUCTION = """
 あなたは幻想郷を舞台とした東方Project二次創作・長編群像劇ノベルの共同執筆者（ゲームマスター）です。
@@ -75,6 +76,7 @@ SYSTEM_INSTRUCTION = """
 【親密なシーンにおける表現の指針】
 - 親密なスキンシップや情愛のシーンを描く際は、艶やかな情景、肌の熱や息遣い、視線の絡み合いや心理的な駆け引きを文芸的かつ濃厚に描くこと。甘美な吐息や感情の高まりの表現には♡を使うこと。
 - 自動フィルターの誤作動を防ぐため、生成する文章内では解剖学的な直接語や幼児的・暴力的な表現は避け、常に「しなやかな肢体」「成熟した曲線美」「柔肌」「深奥」「熱い吐息」といった上品で艶やかな比喩表現を用いること。
+- 出力フィルターの誤検知を防ぐため、直接的な解剖学用語や過激な単語は避け、吐息や視線、感情の機微と人外の格の違いを上品かつ濃厚な文芸表現で描き、メタ発言を一切含めず「・日時：」から直ちに小説の続きを執筆すること。
 """
 
 # セーフティフィルター全解除（公式最新仕様の OFF に統一）
@@ -295,13 +297,13 @@ def is_refusal_response(text):
 
 
 # ★直近ログをGemini API本来のマルチターン配列（user / model）に整える関数
-def build_multiturn_contents(recent_messages, sanitized_action, safety_steering):
+def build_multiturn_contents(recent_messages, sanitized_action):
   contents = []
   for m in recent_messages:
     api_role = "user" if m.get("role") == "user" else "model"
     text = sanitize_for_api(m.get("content", "")).strip()
     if not text:
-      text = "（そのまま状況を見守る）" if api_role == "user" else "……"
+      text = EMPTY_ACTION_PLACEHOLDER if api_role == "user" else "……"
 
     # API仕様上、会話配列の先頭は必ず user に揃える
     if not contents and api_role != "user":
@@ -322,13 +324,8 @@ def build_multiturn_contents(recent_messages, sanitized_action, safety_steering)
           )
       )
 
-  # 最新のユーザー入力（執筆指針は最新ターンのみに添え、過去ターンの前方一致を維持）
-  action_body = sanitized_action.strip() or "（そのまま現在の状況や行為をさらに一歩進める）"
-  latest_user_text = (
-      f"{action_body}\n\n"
-      f"{safety_steering}"
-      "※メタ発言を一切含めず、「・日時：」から直ちに小説の続きを執筆すること。"
-  )
+  # 最新のユーザー入力（過去ターン化しても1文字もズレないよう装飾を付けず統一）
+  latest_user_text = sanitized_action.strip() or EMPTY_ACTION_PLACEHOLDER
 
   if contents and contents[-1].role == "user":
     prev_text = contents[-1].parts[0].text
@@ -832,33 +829,38 @@ with st.sidebar:
       help="Neonは実使用500前後で省エネ動作するため2048のままでも安心です。",
   )
 
-  # ★AIに送る直近生ログの往復数スライダー（初期値を 5 に設定）
+  # ★AIに送る直近生ログの往復数スライダー（キャッシュ最大化のため初期値を 12 に設定）
   context_rounds = st.slider(
       "📡 AIへ送る直近ログ数（往復）",
       min_value=1,
       max_value=12,
-      value=5,
-      help="1〜2往復に絞ると突破＆節約可。4〜5往復で同じ幕内の整合性が安定します。",
+      value=12,
+      key="context_rounds_slider",
+      help="12にしておくと同じ幕のあいだ先頭がズレず、直近ログまでキャッシュに乗りやすくなります（検閲誤爆時のみ1〜2に下げて回避）。",
+  )
+
+  # ★幕が進んでもスライダー値がリセットされないよう max_value を固定化
+  slider_max_acts = max(
+      200, ((len(st.session_state.summaries) // 100) + 1) * 100
   )
 
   # ★全文を送る過去要約の幕数スライダー（初期値を 3 に設定）
-  max_sum_acts = max(1, len(st.session_state.summaries))
-  default_sum_acts = min(3, max_sum_acts)
   full_summary_acts = st.slider(
       "📚 全文を送る過去要約（直近〇幕）",
       min_value=0,
-      max_value=max_sum_acts,
-      value=default_sum_acts,
+      max_value=slider_max_acts,
+      value=3,
+      key="full_summary_acts_slider",
       help="直近の重要展開を全文でAIに渡します。",
   )
 
-  # ★抜粋（見出し＋末尾70字）を送る幕数スライダー
-  default_excerpt_acts = min(15, max_sum_acts)
+  # ★抜粋（見出し＋末尾70字）を送る幕数スライダー（初期値を 15 に設定）
   excerpt_summary_acts = st.slider(
       "✂️ 抜粋を送る過去要約（その前の〇幕）",
       min_value=0,
-      max_value=max_sum_acts,
-      value=default_excerpt_acts,
+      max_value=slider_max_acts,
+      value=15,
+      key="excerpt_summary_acts_slider",
       help="全文より古い幕のうち、見出し＋末尾70文字を残す幕数です。",
   )
 
@@ -1156,8 +1158,8 @@ else:
 
     # ★2. 要約アーカイブを3段階（全文 / 抜粋 / 古い幕の軽量化）で構築
     total_summaries = len(st.session_state.summaries)
-    full_start = total_summaries - full_summary_acts
-    excerpt_start = full_start - excerpt_summary_acts
+    full_start = max(0, total_summaries - full_summary_acts)
+    excerpt_start = max(0, full_start - excerpt_summary_acts)
 
     compressed_summaries = []
     full_cnt = excerpt_cnt = title_cnt = skip_cnt = 0
@@ -1218,8 +1220,6 @@ else:
     all_recent_candidates = prev_act_messages + curr_act_without_last
     sanitized_action = sanitize_for_api(action_input)
 
-    safety_steering = "※執筆指針：出力フィルターの誤検知を防ぐため、直接的な解剖学用語や過激な単語は避け、吐息や視線、感情の機微と人外の格の違いを上品かつ濃厚な文芸表現で描くこと。\n"
-
     output_story = None
     error_detail = None
     jpy_cost = 0.0
@@ -1234,7 +1234,7 @@ else:
       ):
         recent_messages = all_recent_candidates[-msg_limit:]
         multiturn_contents = build_multiturn_contents(
-            recent_messages, sanitized_action, safety_steering
+            recent_messages, sanitized_action
         )
         last_contents_chars = sum(
             len(p.text or "")
