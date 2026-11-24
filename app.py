@@ -23,7 +23,6 @@ def get_supabase_client():
 
 
 gemini_client = get_gemini_client()
-supabase = get_supabase_client()
 
 SAVE_ID = "main_story"
 WINDOW_ROUNDS = 10  # 10往復（20メッセージ）を一幕として管理
@@ -442,27 +441,98 @@ def execute_scroll(direction="top"):
   components.html(js_code, height=0)
 
 
-# 2. DB操作 & 設定データの構造化管理
-def fetch_save_data():
+# 2. DB操作 & 設定データの構造化管理（ヌル文字除去・自動リトライ・安全ガード付き）
+def strip_null_chars(obj):
+  """PostgreSQL JSONBが拒否するヌル文字（\\x00）を再帰的に除去する"""
+  if isinstance(obj, str):
+    return obj.replace("\x00", "")
+  if isinstance(obj, list):
+    return [strip_null_chars(x) for x in obj]
+  if isinstance(obj, dict):
+    return {k: strip_null_chars(v) for k, v in obj.items()}
+  return obj
+
+
+def get_save_payload_kb(summaries, messages):
   try:
-    res = (
-        supabase.table("novel_saves")
-        .select("*")
-        .eq("id", SAVE_ID)
-        .single()
-        .execute()
+    raw = json.dumps(
+        {"summaries": summaries, "messages": messages}, ensure_ascii=False
     )
-    if res.data:
-      return res.data.get("summaries", []), res.data.get("messages", [])
+    return len(raw.encode("utf-8")) / 1024.0
   except Exception:
-    pass
-  return [], []
+    return 0.0
 
 
-def commit_save_data(summaries, messages):
-  supabase.table("novel_saves").update(
-      {"summaries": summaries, "messages": messages}
-  ).eq("id", SAVE_ID).execute()
+def format_supabase_error(e):
+  parts = [f"種別: {type(e).__name__}"]
+  for attr in ("code", "message", "details", "hint"):
+    val = getattr(e, attr, None)
+    if val:
+      parts.append(f"{attr}: {val}")
+  if len(parts) == 1:
+    parts.append(str(e))
+  return " / ".join(parts)
+
+
+def fetch_save_data():
+  last_err = None
+  for attempt in range(3):
+    try:
+      if attempt > 0:
+        get_supabase_client.clear()
+      client = get_supabase_client()
+      res = (
+          client.table("novel_saves")
+          .select("*")
+          .eq("id", SAVE_ID)
+          .single()
+          .execute()
+      )
+      if res.data:
+        return res.data.get("summaries", []), res.data.get("messages", []), None
+      return [], [], None
+    except Exception as e:
+      last_err = format_supabase_error(e)
+      if attempt < 2:
+        time.sleep(1.0 * (attempt + 1))
+  return [], [], last_err
+
+
+def commit_save_data(summaries, messages, allow_empty=False):
+  """自動リトライ・接続リフレッシュ・エラー詳細返却つきの安全保存"""
+  if st.session_state.get("db_load_failed", False) and not allow_empty:
+    err_msg = (
+        "初回DB読込に失敗しているため、既存データ保護のため上書き保存を停止しました。"
+        "ページを再読み込みしてください。"
+    )
+    st.session_state.unsaved_error = err_msg
+    return False, err_msg
+
+  clean_summaries = strip_null_chars(summaries)
+  clean_messages = strip_null_chars(messages)
+  payload_kb = get_save_payload_kb(clean_summaries, clean_messages)
+  st.session_state.last_save_kb = payload_kb
+
+  last_err = None
+  for attempt in range(3):
+    try:
+      if attempt > 0:
+        get_supabase_client.clear()
+      client = get_supabase_client()
+      client.table("novel_saves").update(
+          {"summaries": clean_summaries, "messages": clean_messages}
+      ).eq("id", SAVE_ID).execute()
+      st.session_state.unsaved_error = None
+      return True, None
+    except Exception as e:
+      last_err = (
+          f"{format_supabase_error(e)} （送信データ量: 約 {payload_kb:.1f} KB）"
+      )
+      if attempt < 2:
+        time.sleep(1.5 * (attempt + 1))
+
+  st.session_state.unsaved_error = last_err
+  return False, last_err
 
 
 def parse_legacy_memo(raw_text):
@@ -536,7 +606,7 @@ def sync_and_save_settings():
       st.session_state.world_text,
       st.session_state.characters,
   )
-  commit_save_data(st.session_state.summaries, st.session_state.messages)
+  return commit_save_data(st.session_state.summaries, st.session_state.messages)
 
 
 def save_structured_memo(messages, world_text, characters):
@@ -695,9 +765,19 @@ st.markdown(
 )
 
 if "summaries" not in st.session_state or "messages" not in st.session_state:
-  db_summaries, db_messages = fetch_save_data()
+  db_summaries, db_messages, load_err = fetch_save_data()
   st.session_state.summaries = db_summaries
   st.session_state.messages = db_messages
+  st.session_state.db_load_failed = bool(load_err)
+  st.session_state.db_load_error = load_err
+
+if "unsaved_error" not in st.session_state:
+  st.session_state.unsaved_error = None
+
+if "last_save_kb" not in st.session_state:
+  st.session_state.last_save_kb = get_save_payload_kb(
+      st.session_state.summaries, st.session_state.messages
+  )
 
 if "world_text" not in st.session_state or "characters" not in st.session_state:
   w_text, chars = get_structured_memo(st.session_state.messages)
@@ -750,6 +830,33 @@ active_char_count = sum(
 total_char_count = len(st.session_state.characters)
 
 with st.sidebar:
+  # ★DB読込失敗・未保存エラーの警告＆復旧ボタン
+  if st.session_state.get("db_load_failed"):
+    st.error(
+        f"⚠️ DB読込失敗（上書き防止中）\n\n{st.session_state.get('db_load_error', '')}"
+    )
+    if st.button("🔄 DBを再読み込み", use_container_width=True, type="primary"):
+      for k in ("summaries", "messages", "world_text", "characters"):
+        st.session_state.pop(k, None)
+      st.rerun()
+
+  if st.session_state.get("unsaved_error"):
+    st.error(f"⚠️ DB未保存データあり\n\n{st.session_state.unsaved_error}")
+    if st.button(
+        "💾 未保存データを再保存",
+        key="sidebar_retry_save",
+        use_container_width=True,
+        type="primary",
+    ):
+      ok, retry_err = commit_save_data(
+          st.session_state.summaries, st.session_state.messages
+      )
+      if ok:
+        st.toast("💾 再保存に成功しました！")
+        st.rerun()
+      else:
+        st.error(f"再保存失敗: {retry_err}")
+
   # ★1. 画面上下クイックジャンプボタン
   sc_col1, sc_col2 = st.columns(2)
   with sc_col1:
@@ -774,9 +881,12 @@ with st.sidebar:
         type="primary",
         use_container_width=True,
     ):
-      sync_and_save_settings()
-      st.toast("📌 世界観とキャラクター設定を保存しました！")
-      st.rerun()
+      ok, err = sync_and_save_settings()
+      if ok:
+        st.toast("📌 世界観とキャラクター設定を保存しました！")
+        st.rerun()
+      else:
+        st.error(f"⚠️ 保存失敗: {err}")
 
   st.markdown("---")
   st.title("📜 記憶アーカイブ")
@@ -808,6 +918,9 @@ with st.sidebar:
   if "last_debug_info" in st.session_state:
     with st.expander("🔍 送信内訳・キャッシュ診断", expanded=False):
       st.markdown(st.session_state.last_debug_info["breakdown"])
+      st.caption(
+          f"💾 DB保存データ総量: 約 {st.session_state.get('last_save_kb', 0.0):.1f} KB"
+      )
       st.caption("API usage_metadata 生データ")
       st.code(st.session_state.last_debug_info["usage_raw"], language="json")
 
@@ -891,17 +1004,44 @@ with st.sidebar:
     if len(chat_msgs) >= 2:
       st.session_state.messages.pop()  # assistant
       st.session_state.messages.pop()  # user
-      commit_save_data(st.session_state.summaries, st.session_state.messages)
-      st.toast("直前の1往復を巻き戻しました")
-      st.rerun()
+      ok, err = commit_save_data(
+          st.session_state.summaries, st.session_state.messages
+      )
+      if ok:
+        st.toast("直前の1往復を巻き戻しました")
+        st.rerun()
+      else:
+        st.error(f"⚠️ 巻き戻しの保存に失敗しました: {err}")
 
-  if st.button("物語をリセット"):
-    commit_save_data([], [])
-    st.session_state.summaries = []
-    st.session_state.messages = []
-    st.session_state.selected_act = None
-    st.session_state.just_finished_act = False
-    st.rerun()
+  with st.expander("💾 バックアップ・緊急ツール", expanded=False):
+    st.caption(
+        f"現在の総データサイズ: 約 {st.session_state.get('last_save_kb', 0.0):.1f} KB"
+    )
+    backup_json = json.dumps(
+        {
+            "summaries": st.session_state.summaries,
+            "messages": st.session_state.messages,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    st.download_button(
+        "📥 全データをJSON保存",
+        data=backup_json.encode("utf-8"),
+        file_name=f"gensouroku_backup_act{current_act}.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+    if st.button("物語をリセット", use_container_width=True):
+      ok, err = commit_save_data([], [], allow_empty=True)
+      if ok:
+        st.session_state.summaries = []
+        st.session_state.messages = []
+        st.session_state.selected_act = None
+        st.session_state.just_finished_act = False
+        st.rerun()
+      else:
+        st.error(f"⚠️ リセットの保存に失敗しました: {err}")
 
   st.markdown("---")
   st.markdown("### 紡がれた歴史")
@@ -937,11 +1077,16 @@ with st.sidebar:
       if st.button("この記録を保存", key=f"save_summary_btn_{idx}"):
         combined = f"【{new_title}】\n{new_body}"
         st.session_state.summaries[idx] = combined
-        commit_save_data(st.session_state.summaries, st.session_state.messages)
-        st.toast(
-            f"第 {idx + 1} 幕の記録を『{new_title}』として更新しました！"
+        ok, err = commit_save_data(
+            st.session_state.summaries, st.session_state.messages
         )
-        st.rerun()
+        if ok:
+          st.toast(
+              f"第 {idx + 1} 幕の記録を『{new_title}』として更新しました！"
+          )
+          st.rerun()
+        else:
+          st.error(f"⚠️ 記録の保存に失敗しました: {err}")
 
 # 5. メイン画面の描画（最上部アンカー設置）
 st.markdown('<div id="page-top-anchor"></div>', unsafe_allow_html=True)
@@ -960,9 +1105,12 @@ if nav_mode == "📌 世界観・キャラ設定":
         type="primary",
         use_container_width=True,
     ):
-      sync_and_save_settings()
-      st.toast("📌 世界観とキャラクター設定を保存しました！")
-      st.rerun()
+      ok, err = sync_and_save_settings()
+      if ok:
+        st.toast("📌 世界観とキャラクター設定を保存しました！")
+        st.rerun()
+      else:
+        st.error(f"⚠️ 保存失敗: {err}")
 
   st.subheader("🌐 世界観・大目標・契約・情勢メモ")
   st.text_area(
@@ -1018,9 +1166,12 @@ if nav_mode == "📌 世界観・キャラ設定":
               "active": True,
           })
           st.session_state.char_open_states[new_id] = True
-          sync_and_save_settings()
-          st.toast(f"✨ {new_c_name.strip()} を図鑑に追加＆保存しました！")
-          st.rerun()
+          ok, err = sync_and_save_settings()
+          if ok:
+            st.toast(f"✨ {new_c_name.strip()} を図鑑に追加＆保存しました！")
+            st.rerun()
+          else:
+            st.error(f"⚠️ 追加の保存に失敗しました: {err}")
 
   # 登録済みキャラクター一覧（1行ヘッダー：名前直接編集 ＋ 右端にAI読込 ＋ 詳細開閉）
   chars_list = st.session_state.characters
@@ -1083,9 +1234,12 @@ if nav_mode == "📌 世界観・キャラ設定":
       type="primary",
       use_container_width=True,
   ):
-    sync_and_save_settings()
-    st.toast("📌 世界観とキャラクター設定を保存しました！")
-    st.rerun()
+    ok, err = sync_and_save_settings()
+    if ok:
+      st.toast("📌 世界観とキャラクター設定を保存しました！")
+      st.rerun()
+    else:
+      st.error(f"⚠️ 保存失敗: {err}")
 
 elif st.session_state.selected_act is not None:
   # ==========================================
@@ -1362,8 +1516,32 @@ else:
           "usage_raw": last_usage_raw,
       }
 
-      commit_save_data(st.session_state.summaries, st.session_state.messages)
-      st.rerun()
+      ok, save_err = commit_save_data(
+          st.session_state.summaries, st.session_state.messages
+      )
+      if ok:
+        st.rerun()
+
+  # ★保存失敗時でも画面を落とさず、そのままエラー詳細と再保存ボタンを表示
+  if st.session_state.get("unsaved_error"):
+    st.error(
+        f"⚠️ 物語の生成は完了しましたが、Supabaseへの保存に失敗しました。\n\n"
+        f"**エラー詳細:** {st.session_state.unsaved_error}"
+    )
+    if st.button(
+        "💾 未保存データを再保存する",
+        key="main_retry_save",
+        type="primary",
+        use_container_width=True,
+    ):
+      retry_ok, retry_err = commit_save_data(
+          st.session_state.summaries, st.session_state.messages
+      )
+      if retry_ok:
+        st.toast("💾 再保存に成功しました！")
+        st.rerun()
+      else:
+        st.error(f"⚠️ 再保存にも失敗しました: {retry_err}")
 
 # 6. 最下部アンカー設置 ＆ スクロール実行
 st.markdown('<div id="page-bottom-anchor"></div>', unsafe_allow_html=True)
