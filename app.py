@@ -25,6 +25,8 @@ def get_supabase_client():
 gemini_client = get_gemini_client()
 
 SAVE_ID = "main_story"
+ACT_ROW_PREFIX = "act_"
+STORAGE_VERSION_SPLIT = 2
 WINDOW_ROUNDS = 10  # 10往復（20メッセージ）を一幕として管理
 USD_JPY = 158.58  # 現在の為替レート
 EMPTY_ACTION_PLACEHOLDER = "（そのまま現在の状況や行為をさらに一歩進める）"
@@ -441,7 +443,13 @@ def execute_scroll(direction="top"):
   components.html(js_code, height=0)
 
 
-# 2. DB操作 & 設定データの構造化管理（ヌル文字除去・自動リトライ・安全ガード付き）
+# ==============================================================================
+# 2. DB操作（幕ごと分割ストレージ ＋ レガシー自動互換 ＋ 安全お引っ越し）
+# ==============================================================================
+def get_act_row_id(act_num):
+  return f"{ACT_ROW_PREFIX}{int(act_num):04d}"
+
+
 def strip_null_chars(obj):
   """PostgreSQL JSONBが拒否するヌル文字（\\x00）を再帰的に除去する"""
   if isinstance(obj, str):
@@ -453,12 +461,9 @@ def strip_null_chars(obj):
   return obj
 
 
-def get_save_payload_kb(summaries, messages):
+def get_json_kb(obj):
   try:
-    raw = json.dumps(
-        {"summaries": summaries, "messages": messages}, ensure_ascii=False
-    )
-    return len(raw.encode("utf-8")) / 1024.0
+    return len(json.dumps(obj, ensure_ascii=False).encode("utf-8")) / 1024.0
   except Exception:
     return 0.0
 
@@ -474,7 +479,36 @@ def format_supabase_error(e):
   return " / ".join(parts)
 
 
-def fetch_save_data():
+def make_meta_entry():
+  return {
+      "role": "system_meta",
+      "content": json.dumps(
+          {"storage_version": STORAGE_VERSION_SPLIT}, ensure_ascii=False
+      ),
+      "act": -2,
+  }
+
+
+def detect_storage_mode(main_messages):
+  """main_story の中身から分割モードかレガシーモードかを判定する"""
+  has_v2_meta = False
+  has_act_msgs = False
+  for m in main_messages:
+    if m.get("act") == -2 and m.get("role") == "system_meta":
+      try:
+        meta = json.loads(m.get("content", "{}"))
+        if meta.get("storage_version", 1) >= STORAGE_VERSION_SPLIT:
+          has_v2_meta = True
+      except Exception:
+        pass
+    elif m.get("act", 1) >= 1:
+      has_act_msgs = True
+  if has_v2_meta and not has_act_msgs:
+    return "split"
+  return "legacy"
+
+
+def fetch_main_row():
   last_err = None
   for attempt in range(3):
     try:
@@ -498,20 +532,54 @@ def fetch_save_data():
   return [], [], last_err
 
 
-def commit_save_data(summaries, messages, allow_empty=False):
-  """自動リトライ・接続リフレッシュ・エラー詳細返却つきの安全保存"""
-  if st.session_state.get("db_load_failed", False) and not allow_empty:
-    err_msg = (
-        "初回DB読込に失敗しているため、既存データ保護のため上書き保存を停止しました。"
-        "ページを再読み込みしてください。"
-    )
+def fetch_acts_batch(act_nums):
+  """指定した幕番号の生ログを1回のクエリでまとめて取得する"""
+  valid_acts = sorted({int(a) for a in act_nums if int(a) >= 1})
+  if not valid_acts:
+    return {}, None
+  row_ids = [get_act_row_id(a) for a in valid_acts]
+  last_err = None
+  for attempt in range(3):
+    try:
+      if attempt > 0:
+        get_supabase_client.clear()
+      client = get_supabase_client()
+      res = (
+          client.table("novel_saves")
+          .select("id, messages")
+          .in_("id", row_ids)
+          .execute()
+      )
+      result = {a: [] for a in valid_acts}
+      for row in res.data or []:
+        rid = row.get("id", "")
+        if rid.startswith(ACT_ROW_PREFIX):
+          try:
+            a_num = int(rid[len(ACT_ROW_PREFIX) :])
+            result[a_num] = row.get("messages", []) or []
+          except ValueError:
+            pass
+      return result, None
+    except Exception as e:
+      last_err = format_supabase_error(e)
+      if attempt < 2:
+        time.sleep(1.0 * (attempt + 1))
+  return {}, last_err
+
+
+def save_act_row(act_num, act_messages):
+  """指定した1幕の生ログだけを軽量保存（約20〜35KB）"""
+  if st.session_state.get("db_load_failed", False):
+    err_msg = "初回DB読込に失敗しているため、既存データ保護のため保存を停止しました。"
     st.session_state.unsaved_error = err_msg
     return False, err_msg
 
-  clean_summaries = strip_null_chars(summaries)
-  clean_messages = strip_null_chars(messages)
-  payload_kb = get_save_payload_kb(clean_summaries, clean_messages)
+  clean_msgs = strip_null_chars(act_messages)
+  row_id = get_act_row_id(act_num)
+  payload = {"id": row_id, "summaries": [], "messages": clean_msgs}
+  payload_kb = get_json_kb(payload)
   st.session_state.last_save_kb = payload_kb
+  st.session_state.last_save_label = f"第 {act_num} 幕レコード単体"
 
   last_err = None
   for attempt in range(3):
@@ -519,20 +587,295 @@ def commit_save_data(summaries, messages, allow_empty=False):
       if attempt > 0:
         get_supabase_client.clear()
       client = get_supabase_client()
-      client.table("novel_saves").update(
-          {"summaries": clean_summaries, "messages": clean_messages}
-      ).eq("id", SAVE_ID).execute()
+      client.table("novel_saves").upsert(payload, on_conflict="id").execute()
       st.session_state.unsaved_error = None
+      st.session_state.pending_retry = None
       return True, None
     except Exception as e:
       last_err = (
-          f"{format_supabase_error(e)} （送信データ量: 約 {payload_kb:.1f} KB）"
+          f"{format_supabase_error(e)} （{row_id} 送信量: 約 {payload_kb:.1f} KB）"
       )
       if attempt < 2:
         time.sleep(1.5 * (attempt + 1))
 
   st.session_state.unsaved_error = last_err
+  st.session_state.pending_retry = {"type": "act", "act": act_num}
   return False, last_err
+
+
+def build_memo_entry(world_text, characters):
+  clean_chars = [
+      {
+          "id": c.get("id", uuid.uuid4().hex[:8]),
+          "name": c["name"].strip(),
+          "desc": c["desc"].strip(),
+          "active": c.get("active", True),
+      }
+      for c in characters
+      if c.get("name", "").strip()
+  ]
+  if world_text.strip() or clean_chars:
+    payload = json.dumps(
+        {"world": world_text.strip(), "characters": clean_chars},
+        ensure_ascii=False,
+    )
+    return {"role": "memo", "content": payload, "act": -1}
+  return None
+
+
+def save_main_row(summaries, world_text, characters, allow_empty=False):
+  """親レコード（main_story：要約＋設定メモのみ）を保存"""
+  if st.session_state.get("db_load_failed", False) and not allow_empty:
+    err_msg = "初回DB読込に失敗しているため、既存データ保護のため保存を停止しました。"
+    st.session_state.unsaved_error = err_msg
+    return False, err_msg
+
+  clean_summaries = strip_null_chars(summaries)
+  if st.session_state.storage_mode == "split":
+    main_msgs = []
+    memo_entry = build_memo_entry(world_text, characters)
+    if memo_entry:
+      main_msgs.append(memo_entry)
+    main_msgs.append(make_meta_entry())
+  else:
+    main_msgs = save_structured_memo(
+        st.session_state.legacy_messages, world_text, characters
+    )
+    st.session_state.legacy_messages = main_msgs
+
+  clean_msgs = strip_null_chars(main_msgs)
+  payload = {"summaries": clean_summaries, "messages": clean_msgs}
+  payload_kb = get_json_kb(payload)
+  st.session_state.last_save_kb = payload_kb
+  st.session_state.last_save_label = (
+      "親レコード（要約＋設定）"
+      if st.session_state.storage_mode == "split"
+      else "全データ一括（移行前）"
+  )
+
+  last_err = None
+  for attempt in range(3):
+    try:
+      if attempt > 0:
+        get_supabase_client.clear()
+      client = get_supabase_client()
+      client.table("novel_saves").update(payload).eq("id", SAVE_ID).execute()
+      st.session_state.unsaved_error = None
+      st.session_state.pending_retry = None
+      return True, None
+    except Exception as e:
+      last_err = (
+          f"{format_supabase_error(e)} （main_story 送信量: 約 {payload_kb:.1f} KB）"
+      )
+      if attempt < 2:
+        time.sleep(1.5 * (attempt + 1))
+
+  st.session_state.unsaved_error = last_err
+  st.session_state.pending_retry = {"type": "main"}
+  return False, last_err
+
+
+def migrate_to_split_storage():
+  """レガシー1行データを幕ごと行へ安全に2段階移行する（失敗時は元データ無傷）"""
+  summaries = st.session_state.summaries
+  all_msgs = st.session_state.legacy_messages
+  fallback_act = len(summaries) + 1
+
+  # 幕番号ごとに生ログをグルーピング
+  grouped = {}
+  for m in all_msgs:
+    act = m.get("act")
+    if act is None:
+      act = fallback_act
+    if act >= 1:
+      entry = dict(m)
+      entry["act"] = act
+      grouped.setdefault(act, []).append(entry)
+
+  act_nums = sorted(grouped.keys())
+  progress_bar = st.progress(0.0, text="幕ごとのデータを移行準備中...")
+
+  # Step 1: 10幕ずつバッチで act_XXXX 行へ upsert（ここが100%成功するまで main_story は一切触らない）
+  batch_size = 10
+  total_acts = max(1, len(act_nums))
+  written_ids = []
+
+  for start_idx in range(0, len(act_nums), batch_size):
+    batch_nums = act_nums[start_idx : start_idx + batch_size]
+    rows = []
+    for a_num in batch_nums:
+      rid = get_act_row_id(a_num)
+      rows.append({
+          "id": rid,
+          "summaries": [],
+          "messages": strip_null_chars(grouped[a_num]),
+      })
+      written_ids.append(rid)
+
+    ok_batch = False
+    last_err = None
+    for attempt in range(3):
+      try:
+        if attempt > 0:
+          get_supabase_client.clear()
+        client = get_supabase_client()
+        client.table("novel_saves").upsert(rows, on_conflict="id").execute()
+        ok_batch = True
+        break
+      except Exception as e:
+        last_err = format_supabase_error(e)
+        if attempt < 2:
+          time.sleep(1.5 * (attempt + 1))
+
+    if not ok_batch:
+      progress_bar.empty()
+      return (
+          False,
+          f"第 {batch_nums[0]}〜{batch_nums[-1]} 幕の書き込みで失敗しました（元の main_story は無傷です）: {last_err}",
+      )
+
+    done_ratio = min(1.0, (start_idx + len(batch_nums)) / total_acts * 0.85)
+    progress_bar.progress(
+        done_ratio,
+        text=f"幕レコード保存中... ({start_idx + len(batch_nums)} / {len(act_nums)} 幕完了)",
+    )
+
+  # Step 2: 書き込み件数の実在確認
+  if written_ids:
+    try:
+      client = get_supabase_client()
+      verify_ids = []
+      for i in range(0, len(written_ids), 50):
+        chunk = written_ids[i : i + 50]
+        res = (
+            client.table("novel_saves")
+            .select("id")
+            .in_("id", chunk)
+            .execute()
+        )
+        verify_ids.extend([r["id"] for r in (res.data or [])])
+      if len(set(verify_ids)) < len(set(written_ids)):
+        progress_bar.empty()
+        return (
+            False,
+            f"検証エラー: 書き込み予定 {len(set(written_ids))} 幕に対し、確認できたのは {len(set(verify_ids))} 幕でした（元の main_story は無傷です）。",
+        )
+    except Exception as e:
+      progress_bar.empty()
+      return (
+          False,
+          f"書き込み検証で通信エラー（元の main_story は無傷です）: {format_supabase_error(e)}",
+      )
+
+  # Step 3: 最後に main_story をスリム化（メモ＋メタ＋要約のみ）
+  progress_bar.progress(0.92, text="親レコード（main_story）を軽量化中...")
+  main_msgs = []
+  memo_entry = build_memo_entry(
+      st.session_state.world_text, st.session_state.characters
+  )
+  if memo_entry:
+    main_msgs.append(memo_entry)
+  main_msgs.append(make_meta_entry())
+
+  slim_payload = {
+      "summaries": strip_null_chars(summaries),
+      "messages": strip_null_chars(main_msgs),
+  }
+  slim_ok = False
+  last_err = None
+  for attempt in range(3):
+    try:
+      if attempt > 0:
+        get_supabase_client.clear()
+      client = get_supabase_client()
+      client.table("novel_saves").update(slim_payload).eq(
+          "id", SAVE_ID
+      ).execute()
+      slim_ok = True
+      break
+    except Exception as e:
+      last_err = format_supabase_error(e)
+      if attempt < 2:
+        time.sleep(1.5 * (attempt + 1))
+
+  progress_bar.empty()
+  if not slim_ok:
+    return False, f"親レコードの軽量化で失敗しました: {last_err}"
+
+  # セッション状態を分割モードへ切り替え
+  st.session_state.storage_mode = "split"
+  st.session_state.legacy_messages = []
+  st.session_state.act_cache = {
+      a: grouped.get(a, [])
+      for a in (fallback_act - 1, fallback_act)
+      if a >= 1
+  }
+  st.session_state.last_save_kb = get_json_kb(slim_payload)
+  st.session_state.last_save_label = "親レコード（移行完了）"
+  st.session_state.unsaved_error = None
+  st.session_state.pending_retry = None
+  return True, f"全 {len(act_nums)} 幕の分割移行が完了しました！"
+
+
+def export_full_backup_json():
+  """現在のストレージ方式に関わらず全データを従来互換JSONとして出力する"""
+  if st.session_state.storage_mode == "legacy":
+    payload = {
+        "summaries": st.session_state.summaries,
+        "messages": st.session_state.legacy_messages,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2), None
+
+  all_messages = []
+  memo_entry = build_memo_entry(
+      st.session_state.world_text, st.session_state.characters
+  )
+  if memo_entry:
+    all_messages.append(memo_entry)
+
+  max_act = len(st.session_state.summaries) + 1
+  fetched_acts = {}
+  # 30幕ずつ安全に分割取得
+  for start_a in range(1, max_act + 1, 30):
+    batch_nums = list(range(start_a, min(max_act + 1, start_a + 30)))
+    part, err = fetch_acts_batch(batch_nums)
+    if err:
+      return None, err
+    fetched_acts.update(part)
+
+  # セッション上で最新のキャッシュがあれば優先
+  for a_num, msgs in st.session_state.act_cache.items():
+    fetched_acts[a_num] = msgs
+
+  for a_num in sorted(fetched_acts.keys()):
+    all_messages.extend(fetched_acts[a_num])
+
+  payload = {
+      "summaries": st.session_state.summaries,
+      "messages": all_messages,
+  }
+  return json.dumps(payload, ensure_ascii=False, indent=2), None
+
+
+def get_act_messages(act_num, auto_fetch=True):
+  """指定幕の生ログを取得する（分割モード時は未読込ならオンデマンド取得）"""
+  if act_num < 1:
+    return []
+  if st.session_state.storage_mode == "legacy":
+    return [
+        m for m in st.session_state.legacy_messages if m.get("act") == act_num
+    ]
+  if act_num not in st.session_state.act_cache:
+    if auto_fetch:
+      fetched, err = fetch_acts_batch([act_num])
+      if not err:
+        st.session_state.act_cache[act_num] = fetched.get(act_num, [])
+      else:
+        st.warning(f"⚠️ 第 {act_num} 幕の読み込みに失敗しました: {err}")
+        return []
+    else:
+      return []
+  return st.session_state.act_cache.get(act_num, [])
 
 
 def parse_legacy_memo(raw_text):
@@ -587,6 +930,17 @@ def get_structured_memo(messages):
   return parse_legacy_memo(raw_content)
 
 
+def save_structured_memo(messages, world_text, characters):
+  """世界観テキストとキャラリストをJSON化してmessagesに格納する（レガシー互換用）"""
+  filtered = [
+      m for m in messages if not (m.get("act") == -1 and m.get("role") == "memo")
+  ]
+  memo_entry = build_memo_entry(world_text, characters)
+  if memo_entry:
+    filtered.insert(0, memo_entry)
+  return filtered
+
+
 def sync_and_save_settings():
   """画面上の最新の入力内容をすべて同期してSupabaseへ保存する"""
   if "world_text_editor" in st.session_state:
@@ -601,36 +955,11 @@ def sync_and_save_settings():
     if f"cdesc_{cid}" in st.session_state:
       c["desc"] = st.session_state[f"cdesc_{cid}"]
 
-  st.session_state.messages = save_structured_memo(
-      st.session_state.messages,
+  return save_main_row(
+      st.session_state.summaries,
       st.session_state.world_text,
       st.session_state.characters,
   )
-  return commit_save_data(st.session_state.summaries, st.session_state.messages)
-
-
-def save_structured_memo(messages, world_text, characters):
-  """世界観テキストとキャラリストをJSON化してmessagesに格納する"""
-  filtered = [
-      m for m in messages if not (m.get("act") == -1 and m.get("role") == "memo")
-  ]
-  clean_chars = [
-      {
-          "id": c.get("id", uuid.uuid4().hex[:8]),
-          "name": c["name"].strip(),
-          "desc": c["desc"].strip(),
-          "active": c.get("active", True),
-      }
-      for c in characters
-      if c.get("name", "").strip()
-  ]
-  if world_text.strip() or clean_chars:
-    payload = json.dumps(
-        {"world": world_text.strip(), "characters": clean_chars},
-        ensure_ascii=False,
-    )
-    filtered.insert(0, {"role": "memo", "content": payload, "act": -1})
-  return filtered
 
 
 def build_prompt_memo_text(world_text, characters):
@@ -645,6 +974,38 @@ def build_prompt_memo_text(world_text, characters):
     char_lines = [f"・{c['name'].strip()}：{c['desc'].strip()}" for c in active_chars]
     parts.append("\n".join(char_lines))
   return "\n\n".join(parts)
+
+
+def retry_pending_save(current_act):
+  """保存失敗時の再保存をモードに応じて実行する"""
+  pending = st.session_state.get("pending_retry") or {}
+  if st.session_state.storage_mode == "split":
+    if pending.get("type") == "act":
+      target_a = pending.get("act", current_act)
+      return save_act_row(target_a, st.session_state.act_cache.get(target_a, []))
+    elif pending.get("type") == "both":
+      target_a = pending.get("act", current_act)
+      ok1, err1 = save_act_row(
+          target_a, st.session_state.act_cache.get(target_a, [])
+      )
+      if not ok1:
+        st.session_state.pending_retry = {"type": "both", "act": target_a}
+        return False, err1
+      return save_main_row(
+          st.session_state.summaries,
+          st.session_state.world_text,
+          st.session_state.characters,
+      )
+    return save_main_row(
+        st.session_state.summaries,
+        st.session_state.world_text,
+        st.session_state.characters,
+    )
+  return save_main_row(
+      st.session_state.summaries,
+      st.session_state.world_text,
+      st.session_state.characters,
+  )
 
 
 # 3. 10往復到達時の自動要約（★裏方の要約は4-hydrogen で固定）
@@ -713,23 +1074,19 @@ st.markdown(
         min-width: 0 !important;
         max-width: none !important;
     }
-    /* 1列目：キャラ名（残りの横幅をすべて使う） */
     div[data-testid="stHorizontalBlock"]:has(input[aria-label="キャラ名"]) > div:nth-child(1) {
         flex: 1 1 auto !important;
         width: auto !important;
     }
-    /* 2列目：チェックボックス（中身分の幅だけ確保） */
     div[data-testid="stHorizontalBlock"]:has(input[aria-label="キャラ名"]) > div:nth-child(2) {
         flex: 0 0 auto !important;
         width: auto !important;
     }
-    /* 3列目：開閉ボタン（中身分の幅だけ確保） */
     div[data-testid="stHorizontalBlock"]:has(input[aria-label="キャラ名"]) > div:nth-child(3) {
         flex: 0 0 auto !important;
         width: auto !important;
     }
 
-    /* キャラ名入力欄を1行の見出し風にスリム化 */
     input[aria-label="キャラ名"] {
         font-weight: 700 !important;
         font-size: 1.0rem !important;
@@ -744,7 +1101,6 @@ st.markdown(
         border: 1px solid rgba(217, 83, 111, 0.5) !important;
     }
 
-    /* チェックボックスと開閉ボタンの余白・折り返し防止 */
     div[data-testid="stHorizontalBlock"]:has(input[aria-label="キャラ名"]) [data-testid="stCheckbox"] {
         margin: 0 !important;
         white-space: nowrap !important;
@@ -764,50 +1120,68 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if "summaries" not in st.session_state or "messages" not in st.session_state:
-  db_summaries, db_messages, load_err = fetch_save_data()
+# 初回ロード処理
+if "storage_initialized" not in st.session_state:
+  db_summaries, db_main_msgs, load_err = fetch_main_row()
   st.session_state.summaries = db_summaries
-  st.session_state.messages = db_messages
   st.session_state.db_load_failed = bool(load_err)
   st.session_state.db_load_error = load_err
 
-if "unsaved_error" not in st.session_state:
-  st.session_state.unsaved_error = None
-
-if "last_save_kb" not in st.session_state:
-  st.session_state.last_save_kb = get_save_payload_kb(
-      st.session_state.summaries, st.session_state.messages
-  )
-
-if "world_text" not in st.session_state or "characters" not in st.session_state:
-  w_text, chars = get_structured_memo(st.session_state.messages)
+  w_text, chars = get_structured_memo(db_main_msgs)
   st.session_state.world_text = w_text
   st.session_state.characters = chars
 
+  mode = detect_storage_mode(db_main_msgs)
+  st.session_state.storage_mode = mode
+  init_act = len(db_summaries) + 1
+
+  if mode == "split":
+    st.session_state.legacy_messages = []
+    # 起動時は現在幕と前幕（末尾2往復引き継ぎ用）の2行だけ取得
+    target_acts = [a for a in (init_act - 1, init_act) if a >= 1]
+    fetched, act_err = fetch_acts_batch(target_acts)
+    if act_err:
+      st.session_state.db_load_failed = True
+      st.session_state.db_load_error = act_err
+      st.session_state.act_cache = {}
+    else:
+      st.session_state.act_cache = fetched
+    st.session_state.last_save_kb = get_json_kb(
+        st.session_state.act_cache.get(init_act, [])
+    )
+    st.session_state.last_save_label = f"第 {init_act} 幕レコード単体"
+  else:
+    for m in db_main_msgs:
+      if "act" not in m:
+        m["act"] = init_act
+    st.session_state.legacy_messages = db_main_msgs
+    st.session_state.act_cache = {}
+    st.session_state.last_save_kb = get_json_kb(
+        {"summaries": db_summaries, "messages": db_main_msgs}
+    )
+    st.session_state.last_save_label = "全データ一括（移行前）"
+
+  st.session_state.storage_initialized = True
+
+if "unsaved_error" not in st.session_state:
+  st.session_state.unsaved_error = None
+if "pending_retry" not in st.session_state:
+  st.session_state.pending_retry = None
 if "char_open_states" not in st.session_state:
   st.session_state.char_open_states = {}
-
 if "last_expand_all" not in st.session_state:
   st.session_state.last_expand_all = False
-
-current_act = len(st.session_state.summaries) + 1
-
-for m in st.session_state.messages:
-  if "act" not in m:
-    m["act"] = current_act
-
 if "selected_act" not in st.session_state:
   st.session_state.selected_act = None
-
 if "just_finished_act" not in st.session_state:
   st.session_state.just_finished_act = False
-
 if "scroll_action" not in st.session_state:
   st.session_state.scroll_action = None
+if "prepared_backup_json" not in st.session_state:
+  st.session_state.prepared_backup_json = None
 
-current_act_messages = [
-    m for m in st.session_state.messages if m.get("act") == current_act
-]
+current_act = len(st.session_state.summaries) + 1
+current_act_messages = get_act_messages(current_act, auto_fetch=True)
 act_rounds = len(current_act_messages) // 2
 total_rounds = (len(st.session_state.summaries) * WINDOW_ROUNDS) + act_rounds
 remaining = WINDOW_ROUNDS - act_rounds
@@ -836,8 +1210,7 @@ with st.sidebar:
         f"⚠️ DB読込失敗（上書き防止中）\n\n{st.session_state.get('db_load_error', '')}"
     )
     if st.button("🔄 DBを再読み込み", use_container_width=True, type="primary"):
-      for k in ("summaries", "messages", "world_text", "characters"):
-        st.session_state.pop(k, None)
+      st.session_state.pop("storage_initialized", None)
       st.rerun()
 
   if st.session_state.get("unsaved_error"):
@@ -848,9 +1221,7 @@ with st.sidebar:
         use_container_width=True,
         type="primary",
     ):
-      ok, retry_err = commit_save_data(
-          st.session_state.summaries, st.session_state.messages
-      )
+      ok, retry_err = retry_pending_save(current_act)
       if ok:
         st.toast("💾 再保存に成功しました！")
         st.rerun()
@@ -891,6 +1262,11 @@ with st.sidebar:
   st.markdown("---")
   st.title("📜 記憶アーカイブ")
 
+  if st.session_state.storage_mode == "split":
+    st.caption("⚡ 軽量モード稼働中（幕ごと分割保存）")
+  else:
+    st.caption("📦 移行前モード（全データ一括保存）")
+
   if st.session_state.selected_act is not None:
     if st.button(
         f"↩ 現在へ戻る（第 {current_act} 幕へ）",
@@ -918,8 +1294,13 @@ with st.sidebar:
   if "last_debug_info" in st.session_state:
     with st.expander("🔍 送信内訳・キャッシュ診断", expanded=False):
       st.markdown(st.session_state.last_debug_info["breakdown"])
+      if st.session_state.last_debug_info.get("fallback_reason"):
+        st.warning(
+            f"🛡️ フォールバック発生理由: {st.session_state.last_debug_info['fallback_reason']}"
+        )
       st.caption(
-          f"💾 DB保存データ総量: 約 {st.session_state.get('last_save_kb', 0.0):.1f} KB"
+          f"💾 直近DB保存量（{st.session_state.get('last_save_label', '')}）: "
+          f"約 {st.session_state.get('last_save_kb', 0.0):.1f} KB"
       )
       st.caption("API usage_metadata 生データ")
       st.code(st.session_state.last_debug_info["usage_raw"], language="json")
@@ -1000,43 +1381,87 @@ with st.sidebar:
 
   # 直前のやり取り（1手）を巻き戻す救急ボタン
   if st.button("⏪ 直前の1手を巻き戻す"):
-    chat_msgs = [m for m in st.session_state.messages if m.get("act", 1) > 0]
-    if len(chat_msgs) >= 2:
-      st.session_state.messages.pop()  # assistant
-      st.session_state.messages.pop()  # user
-      ok, err = commit_save_data(
-          st.session_state.summaries, st.session_state.messages
-      )
-      if ok:
-        st.toast("直前の1往復を巻き戻しました")
-        st.rerun()
+    if st.session_state.storage_mode == "split":
+      curr_list = st.session_state.act_cache.get(current_act, [])
+      if len(curr_list) >= 2:
+        curr_list.pop()  # assistant
+        curr_list.pop()  # user
+        ok, err = save_act_row(current_act, curr_list)
+        if ok:
+          st.toast("直前の1往復を巻き戻しました")
+          st.rerun()
+        else:
+          st.error(f"⚠️ 巻き戻しの保存に失敗しました: {err}")
       else:
-        st.error(f"⚠️ 巻き戻しの保存に失敗しました: {err}")
+        st.toast("現在の幕には巻き戻せる履歴がありません")
+    else:
+      chat_msgs = [
+          m for m in st.session_state.legacy_messages if m.get("act", 1) > 0
+      ]
+      if len(chat_msgs) >= 2:
+        st.session_state.legacy_messages.pop()
+        st.session_state.legacy_messages.pop()
+        ok, err = save_main_row(
+            st.session_state.summaries,
+            st.session_state.world_text,
+            st.session_state.characters,
+        )
+        if ok:
+          st.toast("直前の1往復を巻き戻しました")
+          st.rerun()
+        else:
+          st.error(f"⚠️ 巻き戻しの保存に失敗しました: {err}")
 
   with st.expander("💾 バックアップ・緊急ツール", expanded=False):
     st.caption(
-        f"現在の総データサイズ: 約 {st.session_state.get('last_save_kb', 0.0):.1f} KB"
+        f"保存方式: {'幕ごと分割（超軽量）' if st.session_state.storage_mode == 'split' else '一括保存（移行前）'}\n"
+        f"直近保存サイズ: 約 {st.session_state.get('last_save_kb', 0.0):.1f} KB"
     )
-    backup_json = json.dumps(
-        {
-            "summaries": st.session_state.summaries,
-            "messages": st.session_state.messages,
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
-    st.download_button(
-        "📥 全データをJSON保存",
-        data=backup_json.encode("utf-8"),
-        file_name=f"gensouroku_backup_act{current_act}.json",
-        mime="application/json",
-        use_container_width=True,
-    )
+    if st.session_state.storage_mode == "legacy":
+      backup_json, _ = export_full_backup_json()
+      st.download_button(
+          "📥 全データをJSON保存",
+          data=backup_json.encode("utf-8"),
+          file_name=f"gensouroku_backup_act{current_act}.json",
+          mime="application/json",
+          use_container_width=True,
+      )
+    else:
+      if st.button(
+          "📦 全幕バックアップJSONを作成", use_container_width=True
+      ):
+        with st.spinner("全幕のデータを集計中..."):
+          b_json, b_err = export_full_backup_json()
+          if b_err:
+            st.error(f"集計失敗: {b_err}")
+          else:
+            st.session_state.prepared_backup_json = b_json
+      if st.session_state.get("prepared_backup_json"):
+        st.download_button(
+            "📥 作成済みJSONをダウンロード",
+            data=st.session_state.prepared_backup_json.encode("utf-8"),
+            file_name=f"gensouroku_backup_act{current_act}.json",
+            mime="application/json",
+            use_container_width=True,
+            type="primary",
+        )
+
     if st.button("物語をリセット", use_container_width=True):
-      ok, err = commit_save_data([], [], allow_empty=True)
+      if st.session_state.storage_mode == "split":
+        try:
+          client = get_supabase_client()
+          client.table("novel_saves").delete().like(
+              "id", f"{ACT_ROW_PREFIX}%"
+          ).execute()
+        except Exception:
+          pass
+      st.session_state.summaries = []
+      st.session_state.legacy_messages = []
+      st.session_state.act_cache = {1: []}
+      ok, err = save_main_row([], "", [], allow_empty=True)
       if ok:
-        st.session_state.summaries = []
-        st.session_state.messages = []
+        st.session_state.world_text = ""
+        st.session_state.characters = []
         st.session_state.selected_act = None
         st.session_state.just_finished_act = False
         st.rerun()
@@ -1077,8 +1502,10 @@ with st.sidebar:
       if st.button("この記録を保存", key=f"save_summary_btn_{idx}"):
         combined = f"【{new_title}】\n{new_body}"
         st.session_state.summaries[idx] = combined
-        ok, err = commit_save_data(
-            st.session_state.summaries, st.session_state.messages
+        ok, err = save_main_row(
+            st.session_state.summaries,
+            st.session_state.world_text,
+            st.session_state.characters,
         )
         if ok:
           st.toast(
@@ -1090,6 +1517,31 @@ with st.sidebar:
 
 # 5. メイン画面の描画（最上部アンカー設置）
 st.markdown('<div id="page-top-anchor"></div>', unsafe_allow_html=True)
+
+# ★レガシーモード（移行前）なら、安全なお引っ越しバナーを最上部に表示
+if (
+    st.session_state.storage_mode == "legacy"
+    and not st.session_state.get("db_load_failed")
+    and len(st.session_state.legacy_messages) > 0
+):
+  with st.container(border=True):
+    st.info(
+        f"🚀 **本格軽量化の準備が整っています**（現在の1回あたり保存量: 約 **{st.session_state.get('last_save_kb', 0.0):.1f} KB**）\n\n"
+        "幕ごとに行を分割すると、毎ターンの保存量が **約 25〜35 KB（約1/100）** に激減し、"
+        "タイムアウトエラーを防げます。全幕の保存完了を確認してから親データを切り替えるため安全です。"
+    )
+    if st.button(
+        "📦 幕ごと分割ストレージへ安全に移行する",
+        type="primary",
+        use_container_width=True,
+    ):
+      ok_mig, msg_mig = migrate_to_split_storage()
+      if ok_mig:
+        st.success(f"✨ {msg_mig}")
+        time.sleep(1.2)
+        st.rerun()
+      else:
+        st.error(f"⚠️ 移行を中断しました: {msg_mig}")
 
 if nav_mode == "📌 世界観・キャラ設定":
   # ==========================================
@@ -1130,7 +1582,6 @@ if nav_mode == "📌 世界観・キャラ設定":
       "💡 名前をタップすると直接編集できます。右端の「読込」でAIへの送信ON/OFF、「▼」で詳細文を開閉します。"
   )
 
-  # 検索フィルター ＋ 一括展開トグル
   s_col1, s_col2 = st.columns([3, 1])
   with s_col1:
     search_query = st.text_input(
@@ -1173,7 +1624,6 @@ if nav_mode == "📌 世界観・キャラ設定":
           else:
             st.error(f"⚠️ 追加の保存に失敗しました: {err}")
 
-  # 登録済みキャラクター一覧（1行ヘッダー：名前直接編集 ＋ 右端にAI読込 ＋ 詳細開閉）
   chars_list = st.session_state.characters
   q_lower = search_query.strip().lower()
 
@@ -1215,7 +1665,6 @@ if nav_mode == "📌 世界観・キャラ設定":
       chars_list[idx]["name"] = updated_name
       chars_list[idx]["active"] = updated_active
 
-      # 詳細が開いているときだけ設定テキスト枠を表示
       if is_open:
         auto_height = max(130, min(380, (len(char["desc"]) // 28 + 2) * 26))
         updated_desc = st.text_area(
@@ -1243,7 +1692,7 @@ if nav_mode == "📌 世界観・キャラ設定":
 
 elif st.session_state.selected_act is not None:
   # ==========================================
-  # 過去幕・完結幕の回想画面
+  # 過去幕・完結幕の回想画面（オンデマンド読込）
   # ==========================================
   act_idx = st.session_state.selected_act
   target_act = act_idx + 1
@@ -1266,9 +1715,7 @@ elif st.session_state.selected_act is not None:
       st.session_state.scroll_action = "top"
       st.rerun()
 
-  reminiscence_messages = [
-      m for m in st.session_state.messages if m.get("act") == target_act
-  ]
+  reminiscence_messages = get_act_messages(target_act, auto_fetch=True)
   if reminiscence_messages:
     for msg in reminiscence_messages:
       display_novel_entry(msg["role"], msg["content"])
@@ -1306,7 +1753,10 @@ else:
         "content": action_input,
         "act": current_act,
     }
-    st.session_state.messages.append(user_msg)
+    if st.session_state.storage_mode == "split":
+      st.session_state.act_cache.setdefault(current_act, []).append(user_msg)
+    else:
+      st.session_state.legacy_messages.append(user_msg)
     display_novel_entry("user", action_input)
 
     # ★1. 世界観＋有効キャラクター設定の組み立て（サニタイズ適用）
@@ -1374,60 +1824,64 @@ else:
       system_parts.append(archive_block)
     full_system_instruction = "\n\n".join(system_parts)
 
-    prev_act_messages = [
-        m for m in st.session_state.messages if m.get("act") == current_act - 1
-    ][-4:]
-    curr_act_without_last = [
-        m for m in st.session_state.messages if m.get("act") == current_act
-    ][:-1]
+    prev_act_messages = (
+        get_act_messages(current_act - 1, auto_fetch=True)[-4:]
+        if current_act > 1
+        else []
+    )
+    curr_act_without_last = get_act_messages(current_act, auto_fetch=False)[:-1]
     all_recent_candidates = prev_act_messages + curr_act_without_last
     sanitized_action = sanitize_for_api(action_input)
 
     output_story = None
     error_detail = None
+    primary_fail_reason = None
     jpy_cost = 0.0
     un_in_tok = cache_tok = th_tok = out_tok = 0
     used_fallback = False
     last_usage_raw = "usage_metadata: None"
     last_contents_chars = 0
 
+    def invoke_model(msg_limit, use_model, curr_thinking, temp):
+      recent_messages = all_recent_candidates[-msg_limit:]
+      multiturn_contents = build_multiturn_contents(
+          recent_messages, sanitized_action
+      )
+      c_chars = sum(
+          len(p.text or "")
+          for c in multiturn_contents
+          for p in (c.parts or [])
+      )
+      # 思考＋本文で枠切れしない安全天井（実使用分のみ課金）
+      safe_max_out = max(2048, curr_thinking + 1536)
+      gen_config = types.GenerateContentConfig(
+          system_instruction=full_system_instruction,
+          temperature=temp,
+          max_output_tokens=safe_max_out,
+          safety_settings=CUSTOM_SAFETY_SETTINGS,
+      )
+      if curr_thinking > 0:
+        gen_config.thinking_config = types.ThinkingConfig(
+            thinking_budget=curr_thinking
+        )
+      resp = gemini_client.models.generate_content(
+          model=use_model,
+          contents=multiturn_contents,
+          config=gen_config,
+      )
+      return resp, c_chars
+
     with st.spinner("幻想郷の時間を進めています..."):
-      for attempt_idx, (msg_limit, use_model) in enumerate(
-          [(context_rounds * 2, selected_model), (2, "models/gemini-4-hydrogen")]
-      ):
-        recent_messages = all_recent_candidates[-msg_limit:]
-        multiturn_contents = build_multiturn_contents(
-            recent_messages, sanitized_action
-        )
-        last_contents_chars = sum(
-            len(p.text or "")
-            for c in multiturn_contents
-            for p in (c.parts or [])
-        )
-
+      # ★Phase 1: 選択モデル（通信エラーのみ1回同モデルで再試行）
+      for net_try in range(2):
         try:
-          curr_thinking = thinking_limit if attempt_idx == 0 else 256
-          gen_config = types.GenerateContentConfig(
-              system_instruction=full_system_instruction,
-              temperature=0.85 if attempt_idx == 0 else 0.75,
-              max_output_tokens=2048,
-              safety_settings=CUSTOM_SAFETY_SETTINGS,
+          response, last_contents_chars = invoke_model(
+              context_rounds * 2, selected_model, thinking_limit, 0.85
           )
-          if curr_thinking > 0:
-            gen_config.thinking_config = types.ThinkingConfig(
-                thinking_budget=curr_thinking
-            )
-
-          response = gemini_client.models.generate_content(
-              model=use_model,
-              contents=multiturn_contents,
-              config=gen_config,
-          )
-
           usage_meta = getattr(response, "usage_metadata", None)
           last_usage_raw = format_usage_raw(usage_meta)
           step_cost, step_in, step_cache, step_th, step_out = calc_usage_cost(
-              usage_meta, use_model
+              usage_meta, selected_model
           )
           jpy_cost += step_cost
           un_in_tok += step_in
@@ -1438,17 +1892,18 @@ else:
           if response.text:
             candidate_text = response.text.strip()
             if is_refusal_response(candidate_text):
-              error_detail = "AIがガイドラインを理由に執筆を辞退しました（直近ログ数を1〜2往復に下げて再試行してください）。"
-              continue
+              primary_fail_reason = "ソフト拒否（ガイドライン辞退応答）"
+              error_detail = "AIがガイドラインを理由に執筆を辞退しました。"
+              break
             output_story = candidate_text
-            if attempt_idx >= 1:
-              used_fallback = True
             break
           elif response.candidates:
             finish_reason = getattr(
                 response.candidates[0], "finish_reason", "UNKNOWN"
             )
-            error_detail = f"AI応答中断（理由: {finish_reason}）。安全基準に触れた可能性があります。"
+            primary_fail_reason = f"応答中断（finish_reason: {finish_reason}）"
+            error_detail = f"AI応答中断（理由: {finish_reason}）。"
+            break
           else:
             block_reason = "不明"
             if (
@@ -1458,18 +1913,66 @@ else:
               block_reason = getattr(
                   response.prompt_feedback, "block_reason", "SAFETY"
               )
-            error_detail = f"プロンプト事前遮断（Google規約による門前払い: {block_reason}）"
-
+            primary_fail_reason = f"プロンプト事前遮断（{block_reason}）"
+            error_detail = f"プロンプト事前遮断（{block_reason}）"
+            break
         except Exception as e:
+          primary_fail_reason = f"API通信エラー（{type(e).__name__}: {str(e)[:120]}）"
           error_detail = f"API通信エラー: {str(e)}"
+          if net_try == 0:
+            time.sleep(1.5)
+            continue
+
+      # ★Phase 2: 失敗時のみ 4-hydrogen（直近1往復）へフォールバック
+      if not output_story:
+        try:
+          response, last_contents_chars = invoke_model(
+              2, "models/gemini-4-hydrogen", 256, 0.75
+          )
+          usage_meta = getattr(response, "usage_metadata", None)
+          last_usage_raw = format_usage_raw(usage_meta)
+          step_cost, step_in, step_cache, step_th, step_out = calc_usage_cost(
+              usage_meta, "models/gemini-4-hydrogen"
+          )
+          jpy_cost += step_cost
+          un_in_tok += step_in
+          cache_tok += step_cache
+          th_tok += step_th
+          out_tok += step_out
+
+          if response.text and not is_refusal_response(response.text.strip()):
+            output_story = response.text.strip()
+            used_fallback = True
+          elif response.text:
+            error_detail = (
+                f"1回目: {primary_fail_reason} / 2回目(Hydrogen): ガイドライン辞退"
+            )
+          elif response.candidates:
+            fr = getattr(response.candidates[0], "finish_reason", "UNKNOWN")
+            error_detail = (
+                f"1回目: {primary_fail_reason} / 2回目(Hydrogen): 応答中断({fr})"
+            )
+          else:
+            error_detail = (
+                f"1回目: {primary_fail_reason} / 2回目(Hydrogen): 事前遮断"
+            )
+        except Exception as e:
+          error_detail = (
+              f"1回目: {primary_fail_reason} / 2回目(Hydrogen): 通信エラー({e})"
+          )
 
     if not output_story:
-      st.session_state.messages.pop()
+      if st.session_state.storage_mode == "split":
+        st.session_state.act_cache[current_act].pop()
+      else:
+        st.session_state.legacy_messages.pop()
       st.error(f"⚠️ {error_detail}")
       st.info(f"💡 直前の入力内容: 『{action_input}』")
     else:
       if used_fallback:
-        st.toast("🛡️ 検閲誤爆を自動回避して執筆を継続しました")
+        st.toast(
+            f"🛡️ Hydrogenへ切替（理由: {primary_fail_reason}）"
+        )
       display_novel_entry("assistant", output_story)
 
       assistant_msg = {
@@ -1477,19 +1980,29 @@ else:
           "content": output_story,
           "act": current_act,
       }
-      st.session_state.messages.append(assistant_msg)
+      if st.session_state.storage_mode == "split":
+        st.session_state.act_cache[current_act].append(assistant_msg)
+        updated_act_messages = st.session_state.act_cache[current_act]
+      else:
+        st.session_state.legacy_messages.append(assistant_msg)
+        updated_act_messages = [
+            m
+            for m in st.session_state.legacy_messages
+            if m.get("act") == current_act
+        ]
 
       sum_cost = 0.0
-      updated_act_messages = [
-          m for m in st.session_state.messages if m.get("act") == current_act
-      ]
+      finished_this_turn = False
       if len(updated_act_messages) >= (WINDOW_ROUNDS * 2):
+        finished_this_turn = True
         with st.spinner("一幕の記憶を要約アーカイブへ記録中..."):
           new_summary, sum_cost = summarize_old_context(updated_act_messages)
           st.session_state.summaries.append(new_summary)
           st.session_state.selected_act = len(st.session_state.summaries) - 1
           st.session_state.just_finished_act = True
           st.session_state.scroll_action = "bottom"
+          if st.session_state.storage_mode == "split":
+            st.session_state.act_cache[current_act + 1] = []
 
       total_turn_cost = jpy_cost + sum_cost
       sum_note = f" (うち自動要約: {sum_cost:.2f}円)" if sum_cost > 0 else ""
@@ -1499,7 +2012,6 @@ else:
           f"- 思考: {th_tok:,} tok / 出力: {out_tok:,} tok"
       )
 
-      # 送信内訳と生メタデータの保存
       sys_len = len(system_base_text)
       memo_len = len(memo_block)
       arc_len = len(archive_block)
@@ -1514,13 +2026,36 @@ else:
               f"- 直近ログ＋入力: {last_contents_chars:,} 字"
           ),
           "usage_raw": last_usage_raw,
+          "fallback_reason": primary_fail_reason if used_fallback else None,
       }
 
-      ok, save_err = commit_save_data(
-          st.session_state.summaries, st.session_state.messages
-      )
-      if ok:
-        st.rerun()
+      # ★保存処理（分割モード時は通常ターン＝現在幕30KBだけ！ 幕完結時のみ親も更新）
+      if st.session_state.storage_mode == "split":
+        ok_act, err_act = save_act_row(current_act, updated_act_messages)
+        if not ok_act:
+          if finished_this_turn:
+            st.session_state.pending_retry = {
+                "type": "both",
+                "act": current_act,
+            }
+        elif finished_this_turn:
+          ok_main, _ = save_main_row(
+              st.session_state.summaries,
+              st.session_state.world_text,
+              st.session_state.characters,
+          )
+          if ok_main:
+            st.rerun()
+        else:
+          st.rerun()
+      else:
+        ok, _ = save_main_row(
+            st.session_state.summaries,
+            st.session_state.world_text,
+            st.session_state.characters,
+        )
+        if ok:
+          st.rerun()
 
   # ★保存失敗時でも画面を落とさず、そのままエラー詳細と再保存ボタンを表示
   if st.session_state.get("unsaved_error"):
@@ -1534,9 +2069,7 @@ else:
         type="primary",
         use_container_width=True,
     ):
-      retry_ok, retry_err = commit_save_data(
-          st.session_state.summaries, st.session_state.messages
-      )
+      retry_ok, retry_err = retry_pending_save(current_act)
       if retry_ok:
         st.toast("💾 再保存に成功しました！")
         st.rerun()
